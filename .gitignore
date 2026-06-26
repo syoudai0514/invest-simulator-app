@@ -40,5 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# local database
-/data
+# local database（sim.db はActions用にトラック対象、WALファイルのみ除外）
+/data/*.db-wal
+/data/*.db-shm
