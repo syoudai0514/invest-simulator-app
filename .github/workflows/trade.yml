@@ -5,7 +5,7 @@ on:
     # 米国市場の時間帯（UTC 13:00-21:00, 月-金）に15分間隔で実行。
     # 注: GitHub Actions の cron は混雑時に遅延・スキップされることがあります。
     - cron: "*/15 13-21 * * 1-5"
-  workflow_dispatch: {} # 手動実行も可能
+  workflow_dispatch:
 
 # DB をリポジトリにコミットし戻すため書き込み権限が必要
 permissions:
