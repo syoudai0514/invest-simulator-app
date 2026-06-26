@@ -8,6 +8,7 @@ interface RawQuote {
   regularMarketPrice?: number;
   regularMarketPreviousClose?: number;
   regularMarketChangePercent?: number;
+  regularMarketVolume?: number;
   currency?: string;
   shortName?: string;
   longName?: string;
@@ -23,6 +24,7 @@ export interface Quote {
   jpyRate: number; // 円換算に使用したレート
   previousClose: number | null;
   changePercent: number | null;
+  volume: number | null;
 }
 
 export interface ChartPoint {
@@ -55,6 +57,7 @@ export async function getQuote(rawTicker: string): Promise<Quote> {
     jpyRate,
     previousClose: q.regularMarketPreviousClose ?? null,
     changePercent: q.regularMarketChangePercent ?? null,
+    volume: q.regularMarketVolume ?? null,
   };
 }
 

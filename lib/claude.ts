@@ -1,5 +1,4 @@
 import Groq from "groq-sdk";
-import { getDb } from "./db";
 import { getChart, getQuotes, type Quote } from "./yahoo";
 import {
   executeBuy,
@@ -10,8 +9,8 @@ import {
   recordEquitySnapshot,
   type TradeResult,
 } from "./trading";
+import { runScreener, getScreenedTickers } from "./screener";
 
-// Groq 無料モデル（llama-3.1-70b は tool use 対応済み）
 const MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 
 export interface AiDecision {
@@ -30,18 +29,8 @@ export interface AiTradeCycleResult {
 
 function getClient(): Groq {
   const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "GROQ_API_KEY が未設定です。https://console.groq.com でキーを取得し .env.local に設定してください。",
-    );
-  }
+  if (!apiKey) throw new Error("GROQ_API_KEY が未設定です。");
   return new Groq({ apiKey });
-}
-
-function getWatchlist(): { ticker: string; market: string }[] {
-  return getDb()
-    .prepare("SELECT ticker, market FROM watchlist ORDER BY ticker")
-    .all() as { ticker: string; market: string }[];
 }
 
 async function buildMarketContext(quotes: Quote[]): Promise<string> {
@@ -60,9 +49,9 @@ async function buildMarketContext(quotes: Quote[]): Promise<string> {
       trend = "（チャート取得失敗）";
     }
     parts.push(
-      `- ${q.ticker} (${q.name}) [${q.market}/${q.currency}] 現在値 ${q.price} ` +
+      `- ${q.ticker} (${q.name}) 現在値 $${q.price} ` +
         `(円換算 ${Math.round(q.priceJpy).toLocaleString()}円) ` +
-        `前日比 ${q.changePercent?.toFixed(2) ?? "?"}% | ${trend}`,
+        `本日 ${q.changePercent?.toFixed(2) ?? "?"}% | ${trend}`,
     );
   }
   return parts.join("\n");
@@ -72,8 +61,7 @@ const DECISION_TOOL: Groq.Chat.Completions.ChatCompletionTool = {
   type: "function",
   function: {
     name: "submit_decisions",
-    description:
-      "各ウォッチリスト銘柄に対する売買判断を提出する。BUY/SELL の場合は具体的な株数を指定する。",
+    description: "各銘柄に対する売買判断を提出する。",
     parameters: {
       type: "object",
       properties: {
@@ -82,20 +70,10 @@ const DECISION_TOOL: Groq.Chat.Completions.ChatCompletionTool = {
           items: {
             type: "object",
             properties: {
-              ticker: { type: "string", description: "銘柄ティッカー" },
-              action: {
-                type: "string",
-                enum: ["BUY", "SELL", "HOLD"],
-                description: "売買アクション",
-              },
-              shares: {
-                type: "number",
-                description: "売買株数（HOLDの場合は0）",
-              },
-              reasoning: {
-                type: "string",
-                description: "その判断に至った理由（日本語、簡潔に）",
-              },
+              ticker: { type: "string" },
+              action: { type: "string", enum: ["BUY", "SELL", "HOLD"] },
+              shares: { type: "number" },
+              reasoning: { type: "string" },
             },
             required: ["ticker", "action", "shares", "reasoning"],
           },
@@ -107,10 +85,20 @@ const DECISION_TOOL: Groq.Chat.Completions.ChatCompletionTool = {
 };
 
 export async function getAiDecisions(): Promise<AiDecision[]> {
-  const watchlist = getWatchlist();
-  if (watchlist.length === 0) return [];
+  // 1時間に1度スクリーニングを実行して対象銘柄を更新
+  await runScreener();
+  let tickers = getScreenedTickers();
 
-  const quotes = await getQuotes(watchlist.map((w) => w.ticker));
+  // スクリーナー結果がない場合はウォッチリストにフォールバック
+  if (tickers.length === 0) {
+    console.log("[claude] スクリーナー結果なし、ウォッチリストを使用");
+    const { getDb } = await import("./db");
+    const wl = getDb().prepare("SELECT ticker FROM watchlist").all() as { ticker: string }[];
+    tickers = wl.map((w) => w.ticker);
+  }
+  if (tickers.length === 0) return [];
+
+  const quotes = await getQuotes(tickers);
   if (quotes.length === 0) return [];
 
   const marketContext = await buildMarketContext(quotes);
@@ -136,7 +124,7 @@ export async function getAiDecisions(): Promise<AiDecision[]> {
     messages: [
       {
         role: "user",
-        content: `あなたは仮想資金で運用するポートフォリオマネージャーです。以下の情報をもとに、各銘柄に対する売買判断を行ってください。
+        content: `あなたは仮想資金で運用するデイトレーダーです。以下の情報をもとに、各銘柄に対する売買判断を行ってください。
 
 # 現在の状況
 - 利用可能な現金: ${Math.round(cash).toLocaleString()}円
@@ -146,14 +134,14 @@ export async function getAiDecisions(): Promise<AiDecision[]> {
 # 現在の保有銘柄
 ${holdingsText}
 
-# ウォッチリスト銘柄の市場データ
+# 本日の注目銘柄（ボラティリティ×出来高スコア上位）
 ${marketContext}
 
 # 指示
-- 各銘柄について BUY / SELL / HOLD を判断してください。
-- BUY は現金残高の範囲内に収め、1銘柄あたり総資産の30%を超えないようにしてください。
-- SELL は現在保有している株数を超えないようにしてください。
-- リスク分散を意識し、根拠のある判断のみBUY/SELLしてください。確信が持てなければHOLDで構いません。
+- デイトレ目的で短期の値動きを狙ってください。
+- BUY は現金残高の範囲内、1銘柄あたり総資産の20%以内にしてください。
+- SELL は保有株数以内にしてください。
+- 根拠が薄い場合はHOLDで構いません。
 - 必ず submit_decisions ツールで結果を提出してください。`,
       },
     ],
@@ -162,9 +150,7 @@ ${marketContext}
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
   if (!toolCall) return [];
   try {
-    const parsed = JSON.parse(toolCall.function.arguments) as {
-      decisions?: AiDecision[];
-    };
+    const parsed = JSON.parse(toolCall.function.arguments) as { decisions?: AiDecision[] };
     return parsed.decisions ?? [];
   } catch {
     return [];
