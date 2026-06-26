@@ -26,7 +26,7 @@ import type {
   PortfolioResponse,
   AiTradeCycleResult,
 } from "@/lib/types";
-import { Bot, RefreshCw, Loader2, TrendingUp } from "lucide-react";
+import { Bot, RefreshCw, Loader2, TrendingUp, Newspaper } from "lucide-react";
 
 export default function Dashboard() {
   const [data, setData] = useState<PortfolioResponse | null>(null);
@@ -164,6 +164,22 @@ export default function Dashboard() {
                 </p>
               </div>
               <Switch checked={autoEnabled} onCheckedChange={toggleAuto} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div className="flex items-center gap-2">
+                <Newspaper className="h-4 w-4 text-muted-foreground" />
+                <div>
+                  <p className="font-medium">本日のニュース確認</p>
+                  <p className="text-xs text-muted-foreground">
+                    {data.newsStatus.lastChecked
+                      ? `最終確認 ${new Date(data.newsStatus.lastChecked).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}・${data.newsStatus.tickerCount}銘柄`
+                      : "未確認"}
+                  </p>
+                </div>
+              </div>
+              <Badge variant={data.newsStatus.checkedToday ? "default" : "outline"}>
+                {data.newsStatus.checkedToday ? "確認済み" : "未確認"}
+              </Badge>
             </div>
             <div className="rounded-lg bg-muted/50 p-3 text-xs text-muted-foreground">
               初期資金 {jpy(data.initialCash)} からスタート。間隔の変更は「設定」ページから。

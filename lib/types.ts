@@ -19,6 +19,12 @@ export interface EquitySnapshot {
   createdAt: string;
 }
 
+export interface NewsStatus {
+  checkedToday: boolean;
+  lastChecked: string | null;
+  tickerCount: number;
+}
+
 export interface PortfolioResponse {
   cashJpy: number;
   holdings: HoldingValuation[];
@@ -28,6 +34,7 @@ export interface PortfolioResponse {
   totalPnlJpy: number;
   totalPnlPct: number;
   snapshots: EquitySnapshot[];
+  newsStatus: NewsStatus;
 }
 
 export interface Transaction {

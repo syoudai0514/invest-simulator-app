@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getPortfolioSummary } from "@/lib/trading";
 import { getDb } from "@/lib/db";
+import { getNewsStatus } from "@/lib/news";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,7 @@ export async function GET() {
       )
       .all()
       .reverse();
-    return NextResponse.json({ ...summary, snapshots });
+    return NextResponse.json({ ...summary, snapshots, newsStatus: getNewsStatus() });
   } catch (e) {
     return NextResponse.json(
       { error: (e as Error).message },
