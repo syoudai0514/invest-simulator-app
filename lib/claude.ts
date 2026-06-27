@@ -195,10 +195,16 @@ ${marketContext}
 - ニュース見出しに好材料（決算上振れ・新製品・提携・格上げ等）があれば BUY 方向、悪材料（業績悪化・訴訟・格下げ・調査等）があれば SELL 方向に補正。
 - 指標とニュースが一致したときに確信度を高め、矛盾する場合は HOLD 寄りに。
 
+# 落ちるナイフ・リスク回避（バックテスト検証で損失の主因と判明）
+- 「売られすぎRSI」でも、直近1ヶ月のモメンタムが大きくマイナス（概ね −12% 以下）で急落中の銘柄は“落ちるナイフ”。新規BUYしない。
+- 1株あたりの価格が極端に低い低位株（米国株で概ね $10 未満）は値動きが荒く一晩で大きく下落しやすい。BUYは避ける。
+- 直前に損切りした銘柄を同日〜数日で買い戻さない（リベンジ買いの連敗を防ぐ）。
+- 強い悪材料ニュースがある銘柄は、指標が良くても新規BUYを見送る。
+
 # 指示
 - デイトレ目的で短期の値動きを狙ってください。
 - 上記の判断ルールに沿って、各 BUY/SELL の reasoning に「どの指標・ニュースを根拠にしたか」を必ず具体的に記載してください（例: "RSI28で売られすぎ＋好決算報道"）。
-- BUY は現金残高の範囲内、1銘柄あたり総資産の20%以内にしてください。
+- BUY は現金残高の範囲内、1銘柄あたり総資産の20%以内にしてください（超過分は自動で縮小されます）。株価×株数が枠に収まる現実的な株数を出すこと。
 - SELL は保有株数以内にしてください。
 - 根拠が薄い、または指標とニュースが矛盾する場合はHOLDで構いません。
 - 必ず submit_decisions ツールで結果を提出してください。`,
@@ -216,17 +222,28 @@ ${marketContext}
   }
 }
 
+// 1銘柄あたりの上限（総資産の20%）と維持する現金下限（10%）。
+const MAX_POSITION_PCT = 0.2;
+const MIN_CASH_PCT = 0.1;
+
 export async function runAiTradeCycle(): Promise<AiTradeCycleResult> {
   const ranAt = new Date().toISOString();
   const decisions = await getAiDecisions();
   const executed: TradeResult[] = [];
+
+  // BUYに渡すポジション上限・現金下限（executeBuy側でこの枠に株数をクランプする）
+  const preSummary = await getPortfolioSummary();
+  const limits = {
+    maxPositionJpy: preSummary.totalValueJpy * MAX_POSITION_PCT,
+    minCashJpy: preSummary.totalValueJpy * MIN_CASH_PCT,
+  };
 
   for (const d of decisions) {
     if (d.action === "HOLD" || d.shares <= 0) continue;
     try {
       const result =
         d.action === "BUY"
-          ? await executeBuy(d.ticker, d.shares, "AI", d.reasoning)
+          ? await executeBuy(d.ticker, d.shares, "AI", d.reasoning, limits)
           : await executeSell(d.ticker, d.shares, "AI", d.reasoning);
       executed.push(result);
     } catch (e) {

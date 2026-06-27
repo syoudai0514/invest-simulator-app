@@ -46,7 +46,9 @@ function migrate(db: DatabaseSync) {
       shares       REAL NOT NULL,
       price        REAL NOT NULL,          -- 現地通貨建ての約定単価
       price_jpy    REAL NOT NULL,          -- 円換算した約定単価
-      total_jpy    REAL NOT NULL,          -- 円換算した約定総額
+      total_jpy    REAL NOT NULL,          -- 円換算した約定総額（コスト込みの受払額）
+      fee_jpy      REAL NOT NULL DEFAULT 0,-- 取引コスト（手数料＋スプレッド）円
+      realized_pnl_jpy REAL,               -- SELL時の確定損益（円、コスト控除後）。BUYはNULL
       source       TEXT NOT NULL,          -- AI | MANUAL
       ai_reasoning TEXT,                   -- AI判断の理由（あれば）
       created_at   TEXT NOT NULL DEFAULT (datetime('now'))
@@ -67,9 +69,30 @@ function migrate(db: DatabaseSync) {
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
       total_value_jpy REAL NOT NULL,
       cash_jpy        REAL NOT NULL,
+      benchmark_value_jpy REAL,            -- 同額をSPYでbuy&holdした場合の評価額（円）
       created_at      TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // 既存DBへの後付けマイグレーション（列が無ければ追加）
+  addColumnIfMissing(db, "transactions", "fee_jpy", "REAL NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "transactions", "realized_pnl_jpy", "REAL");
+  addColumnIfMissing(db, "equity_snapshots", "benchmark_value_jpy", "REAL");
+}
+
+/** テーブルに指定列が無ければ ALTER TABLE で追加する。 */
+function addColumnIfMissing(
+  db: DatabaseSync,
+  table: string,
+  column: string,
+  def: string,
+) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as {
+    name: string;
+  }[];
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+  }
 }
 
 function seed(db: DatabaseSync) {
@@ -93,7 +116,8 @@ function seed(db: DatabaseSync) {
   );
   for (const [k, v] of Object.entries(defaults)) upsert.run(k, v);
 
-  // 初期ウォッチリスト（日米サンプル）
+  // 初期ウォッチリスト（スクリーナー未実行時のフォールバック用・米国株のみ）
+  // 注: 自動売買は米国市場時間に動くため、日本株は約定タイミングが不適切。
   const wlCount = db.prepare("SELECT COUNT(*) AS c FROM watchlist").get() as {
     c: number;
   };
@@ -103,7 +127,7 @@ function seed(db: DatabaseSync) {
     );
     insWl.run("AAPL", "US");
     insWl.run("NVDA", "US");
-    insWl.run("7203.T", "JP");
+    insWl.run("SPY", "US");
   }
 }
 

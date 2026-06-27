@@ -4,6 +4,15 @@ import { getQuote, getQuotes, detectMarket } from "./yahoo";
 export type TradeAction = "BUY" | "SELL";
 export type TradeSource = "AI" | "MANUAL";
 
+/** 売買コスト（手数料＋スプレッド）の片道レート。 */
+export const TRADE_COST_RATE = 0.0015;
+
+/** AI売買に課す制約（1銘柄あたり上限・維持する現金下限）。任意。 */
+export interface TradeLimits {
+  maxPositionJpy?: number;
+  minCashJpy?: number;
+}
+
 export interface PortfolioHolding {
   ticker: string;
   shares: number;
@@ -71,20 +80,42 @@ export async function executeBuy(
   shares: number,
   source: TradeSource,
   reasoning?: string,
+  limits?: TradeLimits,
 ): Promise<TradeResult> {
   const ticker = rawTicker.trim().toUpperCase();
   if (!Number.isFinite(shares) || shares <= 0) {
     return { ok: false, message: "数量が不正です" };
   }
   const quote = await getQuote(ticker);
-  const totalJpy = quote.priceJpy * shares;
   const cash = getCash();
-  if (totalJpy > cash) {
+
+  // AIは株価を無視した株数を出しがちなので、却下せず「上限・現金・現金下限に
+  // 収まる最大株数」までクランプする（バックテストの検証で全却下→0取引の不具合を確認）。
+  const requested = shares;
+  const unit = quote.priceJpy * (1 + TRADE_COST_RATE); // 1株あたりの実質流出額
+  const existingValueJpy = (() => {
+    const e = getDb()
+      .prepare("SELECT shares FROM portfolio WHERE ticker = ?")
+      .get(ticker) as { shares: number } | undefined;
+    return (e?.shares ?? 0) * quote.priceJpy;
+  })();
+  const caps = [shares, cash / unit];
+  if (limits?.maxPositionJpy !== undefined) {
+    caps.push((limits.maxPositionJpy - existingValueJpy) / quote.priceJpy);
+  }
+  if (limits?.minCashJpy !== undefined) {
+    caps.push((cash - limits.minCashJpy) / unit);
+  }
+  shares = Math.floor(Math.min(...caps));
+  if (shares < 1) {
     return {
       ok: false,
-      message: `残高不足です（必要 ${Math.round(totalJpy).toLocaleString()}円 / 残高 ${Math.round(cash).toLocaleString()}円）`,
+      message: `資金/上限の制約で約定できませんでした（${ticker} 要求 ${requested}株 / 残高 ${Math.round(cash).toLocaleString()}円）`,
     };
   }
+  const totalJpy = quote.priceJpy * shares;
+  const feeJpy = totalJpy * TRADE_COST_RATE;
+  const outflow = totalJpy + feeJpy; // 現金からの実際の流出額
 
   const db = getDb();
   const existing = db
@@ -105,7 +136,7 @@ export async function executeBuy(
     ).run(ticker, shares, quote.priceJpy, quote.market);
   }
 
-  setCash(cash - totalJpy);
+  setCash(cash - outflow);
   recordTransaction({
     ticker,
     action: "BUY",
@@ -113,13 +144,15 @@ export async function executeBuy(
     price: quote.price,
     priceJpy: quote.priceJpy,
     totalJpy,
+    feeJpy,
+    realizedPnlJpy: null,
     source,
     reasoning,
   });
 
   return {
     ok: true,
-    message: `${ticker} を ${shares} 株購入しました`,
+    message: `${ticker} を ${shares} 株購入しました（手数料 ${Math.round(feeJpy).toLocaleString()}円）`,
     action: "BUY",
     ticker,
     shares,
@@ -142,8 +175,8 @@ export async function executeSell(
   }
   const db = getDb();
   const existing = db
-    .prepare("SELECT shares FROM portfolio WHERE ticker = ?")
-    .get(ticker) as { shares: number } | undefined;
+    .prepare("SELECT shares, avg_cost_jpy AS avgCostJpy FROM portfolio WHERE ticker = ?")
+    .get(ticker) as { shares: number; avgCostJpy: number } | undefined;
   if (!existing || existing.shares < shares) {
     return {
       ok: false,
@@ -153,6 +186,11 @@ export async function executeSell(
 
   const quote = await getQuote(ticker);
   const totalJpy = quote.priceJpy * shares;
+  const feeJpy = totalJpy * TRADE_COST_RATE;
+  const proceeds = totalJpy - feeJpy; // 手数料控除後の受取額
+  // 確定損益 = (売却単価 - 平均取得単価) × 株数 − 売却コスト
+  const realizedPnlJpy = (quote.priceJpy - existing.avgCostJpy) * shares - feeJpy;
+
   const remaining = existing.shares - shares;
   if (remaining > 0) {
     db.prepare("UPDATE portfolio SET shares = ? WHERE ticker = ?").run(
@@ -163,7 +201,7 @@ export async function executeSell(
     db.prepare("DELETE FROM portfolio WHERE ticker = ?").run(ticker);
   }
 
-  setCash(getCash() + totalJpy);
+  setCash(getCash() + proceeds);
   recordTransaction({
     ticker,
     action: "SELL",
@@ -171,13 +209,15 @@ export async function executeSell(
     price: quote.price,
     priceJpy: quote.priceJpy,
     totalJpy,
+    feeJpy,
+    realizedPnlJpy,
     source,
     reasoning,
   });
 
   return {
     ok: true,
-    message: `${ticker} を ${shares} 株売却しました`,
+    message: `${ticker} を ${shares} 株売却しました（確定損益 ${Math.round(realizedPnlJpy).toLocaleString()}円）`,
     action: "SELL",
     ticker,
     shares,
@@ -192,14 +232,16 @@ function recordTransaction(t: {
   price: number;
   priceJpy: number;
   totalJpy: number;
+  feeJpy: number;
+  realizedPnlJpy: number | null;
   source: TradeSource;
   reasoning?: string;
 }): void {
   getDb()
     .prepare(
       `INSERT INTO transactions
-        (ticker, action, shares, price, price_jpy, total_jpy, source, ai_reasoning)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (ticker, action, shares, price, price_jpy, total_jpy, fee_jpy, realized_pnl_jpy, source, ai_reasoning)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       t.ticker,
@@ -208,6 +250,8 @@ function recordTransaction(t: {
       t.price,
       t.priceJpy,
       t.totalJpy,
+      t.feeJpy,
+      t.realizedPnlJpy,
       t.source,
       t.reasoning ?? null,
     );
