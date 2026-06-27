@@ -149,18 +149,19 @@ export async function executeBuy(
     .prepare("SELECT shares, avg_cost_jpy AS avgCostJpy FROM portfolio WHERE ticker = ?")
     .get(ticker) as { shares: number; avgCostJpy: number } | undefined;
 
+  // 平均取得原価は買い手数料込み（= unit）で記録する。これにより SELL 時の確定損益が
+  // 買い・売り両方のコストを正しく反映し、実際の現金増減と一致する。
   if (existing) {
     const newShares = existing.shares + shares;
     const newAvg =
-      (existing.avgCostJpy * existing.shares + quote.priceJpy * shares) /
-      newShares;
+      (existing.avgCostJpy * existing.shares + unit * shares) / newShares;
     db.prepare(
       "UPDATE portfolio SET shares = ?, avg_cost_jpy = ? WHERE ticker = ?",
     ).run(newShares, newAvg, ticker);
   } else {
     db.prepare(
       "INSERT INTO portfolio (ticker, shares, avg_cost_jpy, market) VALUES (?, ?, ?, ?)",
-    ).run(ticker, shares, quote.priceJpy, quote.market);
+    ).run(ticker, shares, unit, quote.market);
   }
 
   setCash(market, cash - outflow);

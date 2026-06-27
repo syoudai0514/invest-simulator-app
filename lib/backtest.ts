@@ -666,14 +666,15 @@ export async function runBacktest(
     const cost = price * shares;
     const fee = cost * TRADE_COST_RATE;
     const outflow = cost + fee;
+    const unitCost = price * (1 + TRADE_COST_RATE); // 買い手数料込みの取得原価
     const existing = positions.get(ticker);
     if (existing) {
       const newShares = existing.shares + shares;
       existing.avgCost =
-        (existing.avgCost * existing.shares + price * shares) / newShares;
+        (existing.avgCost * existing.shares + unitCost * shares) / newShares;
       existing.shares = newShares;
     } else {
-      positions.set(ticker, { shares, avgCost: price });
+      positions.set(ticker, { shares, avgCost: unitCost });
     }
     cash -= outflow;
     trades.push({
@@ -781,7 +782,7 @@ async function askAi(input: {
     messages: [
       {
         role: "user",
-        content: `あなたは仮想資金で運用するデイトレーダーです。${newsIntro}各銘柄の売買判断を行ってください。
+        content: `あなたは仮想資金で運用するスウィングトレーダーです（数日〜数週間の保有を想定）。${newsIntro}各銘柄の売買判断を行ってください。
 
 # 現在の状況（通貨: ${input.currency}）
 - 利用可能な現金: ${Math.round(input.cash).toLocaleString()}

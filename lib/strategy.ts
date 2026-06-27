@@ -99,20 +99,29 @@ const POS_WORDS = [
 const NEG_WORDS = [
   "miss", "misses", "plunge", "plummet", "drop", "fall", "slump", "cut",
   "cuts", "downgrade", "lawsuit", "probe", "investigation", "recall",
-  "warning", "weak", "loss", "bearish", "halt", "fraud", "decline",
+  "warning", "warns", "warn", "caution", "weak", "loss", "bearish", "halt",
+  "fraud", "decline", "disappointing", "slowdown",
   "下方修正", "減益", "赤字", "訴訟", "調査", "格下げ", "リコール", "不正",
-  "急落", "下落", "低迷", "懸念",
+  "急落", "下落", "低迷", "懸念", "警告",
 ];
 
 /** 見出し群から -1..+1 のセンチメントを推定（単純キーワード集計）。 */
+/**
+ * 見出し群から -1..+1 のセンチメントを推定。
+ * 見出し単位で判定し、好材料語と悪材料語が同居する場合（例:「好決算だが需要鈍化を警告」）は
+ * 留保（悪材料）が市場反応を支配しやすいため、その見出しはネガティブ扱いとする。
+ * 注意: あくまで簡易キーワード方式で、皮肉・否定の文脈までは解釈できない。
+ */
 export function classifyNews(titles: string[]): number {
   if (titles.length === 0) return 0;
   let pos = 0;
   let neg = 0;
   for (const raw of titles) {
     const t = raw.toLowerCase();
-    for (const w of POS_WORDS) if (t.includes(w.toLowerCase())) pos++;
-    for (const w of NEG_WORDS) if (t.includes(w.toLowerCase())) neg++;
+    const hasPos = POS_WORDS.some((w) => t.includes(w.toLowerCase()));
+    const hasNeg = NEG_WORDS.some((w) => t.includes(w.toLowerCase()));
+    if (hasNeg) neg++; // 悪材料が含まれる見出しは（好材料が同居しても）ネガティブ寄り
+    else if (hasPos) pos++;
   }
   if (pos + neg === 0) return 0;
   return (pos - neg) / (pos + neg);
