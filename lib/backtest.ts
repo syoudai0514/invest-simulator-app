@@ -11,7 +11,7 @@
  */
 import Groq from "groq-sdk";
 import yahooFinance from "./yf";
-import { summarize } from "./indicators";
+import { summarize, sma } from "./indicators";
 import {
   ruleDecide,
   DEFAULT_PARAMS,
@@ -121,6 +121,11 @@ const STOP_LOSS_PCT = process.env.BT_STOP ? Number(process.env.BT_STOP) : -8;
 const TAKE_PROFIT_PCT = process.env.BT_TP ? Number(process.env.BT_TP) : 15;
 // トレーリングストップ（ピークからこの%下落で手仕舞い）。0なら無効。
 const TRAIL_PCT = process.env.BT_TRAIL ? Number(process.env.BT_TRAIL) : 0;
+// マーケット・レジームフィルタ: ベンチ(SPY)が自身のSMA20を下回る局面は新規BUYを停止。
+// 複数期間(2024-2026の4半年窓)の検証で、全窓プラス・全窓SPY以上・最大DD半減と
+// 最も頑健な改善だったため既定でON（BT_REGIME=0 で無効化可）。
+const REGIME_ON = process.env.BT_REGIME !== "0";
+const REGIME_SMA = Number(process.env.BT_REGIME_SMA) || 20;
 
 interface AiDecision {
   ticker: string;
@@ -331,6 +336,15 @@ export async function runBacktest(
     const todayBar = (t: string): DailyBar | null =>
       (barsByTicker.get(t) ?? []).find((b) => isoDate(b.date) === day) ?? null;
 
+    // マーケット・レジーム判定（前日までのベンチがSMAを下回る＝リスクオフ）
+    let riskOff = false;
+    if (REGIME_ON) {
+      const benchPast = benchBars.filter((b) => b.date < dayDate).map((b) => b.close);
+      const benchSma = sma(benchPast, REGIME_SMA);
+      const benchPrev = benchPast[benchPast.length - 1];
+      riskOff = benchSma != null && benchPrev != null && benchPrev < benchSma;
+    }
+
     // 1) リスク管理（損切り/利確/トレーリング）: 当日始値で評価・約定
     for (const [ticker, pos] of [...positions.entries()]) {
       const bar = todayBar(ticker);
@@ -478,6 +492,19 @@ export async function runBacktest(
     // 5) 約定（当日始値）＋ 全判断を記録
     for (const d of decisions) {
       const bar = todayBar(d.ticker);
+      // リスクオフ局面（SPYがSMA割れ）では新規BUYを停止。保有の手仕舞いSELLは通す。
+      if (d.action === "BUY" && riskOff) {
+        decisionLog.push({
+          date: day,
+          ticker: d.ticker,
+          action: d.action,
+          shares: d.shares,
+          reasoning: d.reasoning,
+          executed: false,
+          rejectReason: "リスクオフ(SPY<SMA)",
+        });
+        continue;
+      }
       if (d.action === "HOLD" || d.shares <= 0) {
         decisionLog.push({
           date: day,

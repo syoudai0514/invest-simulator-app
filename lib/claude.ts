@@ -10,7 +10,7 @@ import {
   type TradeResult,
 } from "./trading";
 import { runScreener, getScreenedTickers } from "./screener";
-import { summarize } from "./indicators";
+import { summarize, sma } from "./indicators";
 import { getNewsForTickers, type NewsByTicker } from "./news";
 
 const MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -229,6 +229,23 @@ ${marketContext}
 const MAX_POSITION_PCT = 0.2;
 const MIN_CASH_PCT = 0.1;
 
+/**
+ * マーケット・レジーム判定: SPYが自身のSMA20を下回る「リスクオフ」局面か。
+ * 複数期間バックテストで、リスクオフ時に新規BUYを止めると全期間プラス・最大DD半減と
+ * 最も頑健な改善だった。取得失敗時は false（通常運用）にフォールバック。
+ */
+async function isRiskOff(): Promise<boolean> {
+  try {
+    const spy = await getChart("SPY", "3mo");
+    const closes = spy.map((c) => c.close);
+    const s = sma(closes, 20);
+    const last = closes[closes.length - 1];
+    return s != null && last < s;
+  } catch {
+    return false;
+  }
+}
+
 export async function runAiTradeCycle(): Promise<AiTradeCycleResult> {
   const ranAt = new Date().toISOString();
   const decisions = await getAiDecisions();
@@ -241,8 +258,18 @@ export async function runAiTradeCycle(): Promise<AiTradeCycleResult> {
     minCashJpy: preSummary.totalValueJpy * MIN_CASH_PCT,
   };
 
+  // リスクオフ局面（SPY<SMA20）では新規BUYを停止。保有の手仕舞いSELLは通す。
+  const riskOff = await isRiskOff();
+
   for (const d of decisions) {
     if (d.action === "HOLD" || d.shares <= 0) continue;
+    if (d.action === "BUY" && riskOff) {
+      executed.push({
+        ok: false,
+        message: `${d.ticker} の新規BUYは見送り（リスクオフ: SPYがSMA20割れ）`,
+      });
+      continue;
+    }
     try {
       const result =
         d.action === "BUY"
