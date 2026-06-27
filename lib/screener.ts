@@ -10,6 +10,11 @@ import { UNIVERSE_TICKERS } from "./universe";
 const SCREEN_INTERVAL_MS = 60 * 60 * 1000; // 1時間
 const TOP_N = 20;
 const BATCH_SIZE = 50; // Yahoo Financeのレート制限対策
+// 低位株（ペニー株）と低流動性銘柄を候補から除外する下限。
+// 1日シミュレーションで、スコア上位がほぼ過熱・低位株・低流動の「フロス」で占められ
+// 良質なセットアップが埋もれることを確認したため追加。
+const MIN_PRICE = 5; // 現地通貨建ての最低株価
+const MIN_DOLLAR_VOLUME = 5_000_000; // 価格×出来高の最低額（流動性）
 
 export interface ScreenedStock {
   ticker: string;
@@ -62,6 +67,9 @@ export async function runScreener(force = false): Promise<string[]> {
       const quotes = await getQuotes(batch);
       for (const q of quotes) {
         if (!q.changePercent || !q.volume) continue;
+        // 低位株・低流動性を除外（フロス排除）
+        if (q.price < MIN_PRICE) continue;
+        if (q.price * q.volume < MIN_DOLLAR_VOLUME) continue;
         // スコア = |変動率| × log(出来高) — 動いていて流動性が高い銘柄を優先
         const score = Math.abs(q.changePercent) * Math.log10(Math.max(q.volume, 1));
         scores.push({ ticker: q.ticker, score, changePercent: q.changePercent, volume: q.volume });
