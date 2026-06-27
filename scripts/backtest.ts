@@ -31,6 +31,16 @@ const THEME_TICKERS = [
   "RKLB", "ASTS", "MNTS", "ASTR", "SPCE", "RDW", "SATL", // 宇宙・衛星
 ];
 
+// AI＋半導体だけに絞ったユニバース（BT_UNIVERSE=aisemi）
+const AISEMI_TICKERS = [
+  // AI・ソフト
+  "NVDA", "PLTR", "AI", "BBAI", "SOUN", "CEVA", "AMBA", "SMCI", "DELL", "AVGO",
+  // 半導体・装置
+  "AMD", "INTC", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC", "MRVL", "WOLF",
+  "ON", "SWKS", "QRVO", "MPWR", "SITM", "DIOD", "COHU", "ACLS", "ONTO", "FORM",
+  "ICHR", "CAMT", "RMBS", "SLAB", "POWI",
+];
+
 const market = (process.argv[2] ?? "US") as "US" | "JP";
 const startDate = process.argv[3] ?? "2026-06-23";
 const endDate = process.argv[4] ?? "2026-06-26";
@@ -57,9 +67,10 @@ function buildConfig(): BacktestConfig {
   }
   const us = UNIVERSE_TICKERS.filter((t) => !t.endsWith(".T"));
   const core = us.slice(0, limit || 120);
-  const tickers = process.env.BT_THEME === "1"
+  let tickers = process.env.BT_THEME === "1"
     ? [...new Set([...core, ...THEME_TICKERS])]
     : core;
+  if (process.env.BT_UNIVERSE === "aisemi") tickers = [...AISEMI_TICKERS];
   return {
     market: "US",
     currency: "USD",
