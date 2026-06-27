@@ -118,7 +118,8 @@ const NEWS_FRESH_DAYS = 7;
 const MAX_POSITION_PCT = Number(process.env.BT_MAXPOS_PCT) || 0.2;
 const MIN_CASH_PCT = process.env.BT_MINCASH_PCT ? Number(process.env.BT_MINCASH_PCT) : 0.1;
 const STOP_LOSS_PCT = process.env.BT_STOP ? Number(process.env.BT_STOP) : -8;
-const TAKE_PROFIT_PCT = process.env.BT_TP ? Number(process.env.BT_TP) : 15;
+// 利確は10%が既定。複数期間検証で勝率が最も高く(約62%)、かつ全窓プラスを維持した水準。
+const TAKE_PROFIT_PCT = process.env.BT_TP ? Number(process.env.BT_TP) : 10;
 // トレーリングストップ（ピークからこの%下落で手仕舞い）。0なら無効。
 const TRAIL_PCT = process.env.BT_TRAIL ? Number(process.env.BT_TRAIL) : 0;
 // マーケット・レジームフィルタ: ベンチ(SPY)が自身のSMA20を下回る局面は新規BUYを停止。
