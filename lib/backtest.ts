@@ -398,6 +398,9 @@ export async function runBacktest(
     }
 
     // 2) スクリーニング（前日まで）
+    // BT_SCREEN=mom: 20日リターン上位（モメンタムファクター）/ breakout: 上昇×出来高増
+    // / 既定 vol: |前日変動率|×log(出来高)（急変動型）
+    const screenMode = process.env.BT_SCREEN || "vol";
     const candidates: { ticker: string; score: number }[] = [];
     for (const t of config.tickers) {
       const bars = barsByTicker.get(t) ?? [];
@@ -405,8 +408,27 @@ export async function runBacktest(
       if (past.length < 2) continue;
       const last = past[past.length - 1];
       const prev = past[past.length - 2];
-      const changePct = ((last.close - prev.close) / prev.close) * 100;
-      const score = Math.abs(changePct) * Math.log10(Math.max(last.volume, 1));
+      // 流動性フロア（ペニー株・薄商い除外）— 全モード共通
+      if (last.close < 5 || last.close * last.volume < 5_000_000) continue;
+      let score: number;
+      if (screenMode === "mom") {
+        // 20日リターン（上昇基調の強さ）
+        const lb = Math.min(20, past.length - 1);
+        const ago = past[past.length - 1 - lb].close;
+        score = ((last.close - ago) / ago) * 100;
+      } else if (screenMode === "breakout") {
+        // 上昇かつ出来高増（ブレイクアウト候補）。下落・薄商いは弱める
+        const lb = Math.min(20, past.length - 1);
+        const ago = past[past.length - 1 - lb].close;
+        const mom = ((last.close - ago) / ago) * 100;
+        const volWin = past.slice(-21, -1);
+        const avgVol = volWin.length ? volWin.reduce((s, b) => s + b.volume, 0) / volWin.length : last.volume;
+        const volRatio = avgVol > 0 ? last.volume / avgVol : 1;
+        score = mom > 0 ? mom * Math.min(volRatio, 3) : mom;
+      } else {
+        const changePct = ((last.close - prev.close) / prev.close) * 100;
+        score = Math.abs(changePct) * Math.log10(Math.max(last.volume, 1));
+      }
       candidates.push({ ticker: t, score });
     }
     candidates.sort((a, b) => b.score - a.score);
