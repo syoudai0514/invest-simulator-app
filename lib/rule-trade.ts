@@ -158,8 +158,11 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
       const cash = getCash(market);
       const quotes = await getQuotes(screened);
       const quoteMap = new Map<string, Quote>(quotes.map((q) => [q.ticker, q]));
+      // force=true: 市場ごとに自分の銘柄のニュースを必ず取得する。
+      // （getNewsForTickers の1日1回キャッシュは市場共通のため、US/JPが同JST日に動くと
+      //  後の市場が先の市場のキャッシュを掴む不具合を回避）
       let news: Record<string, { title: string }[]> = {};
-      try { news = await getNewsForTickers(screened); } catch { /* 指標のみで継続 */ }
+      try { news = await getNewsForTickers(screened, true); } catch { /* 指標のみで継続 */ }
 
       const candidates: Candidate[] = [];
       const ctxByTicker = new Map<string, { rsi14: number | null; sma20: number | null; sma50: number | null; momPct: number; dayRet: number; priceJpy: number }>();
