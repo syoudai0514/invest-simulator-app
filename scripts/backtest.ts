@@ -20,6 +20,8 @@ const params = {
   ...(process.env.BT_MINSCORE ? { minScore: Number(process.env.BT_MINSCORE) } : {}),
   ...(process.env.BT_MOMCEIL ? { momCeiling: Number(process.env.BT_MOMCEIL) } : {}),
   ...(process.env.BT_RSISELL ? { rsiSell: Number(process.env.BT_RSISELL) } : {}),
+  ...(process.env.BT_CAPIT ? { capitDrop: Number(process.env.BT_CAPIT) } : {}),
+  ...(process.env.BT_CAPITBOOST ? { capitBoost: Number(process.env.BT_CAPITBOOST) } : {}),
 };
 
 const market = (process.argv[2] ?? "US") as "US" | "JP";

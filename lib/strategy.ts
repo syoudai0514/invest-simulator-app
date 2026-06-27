@@ -29,6 +29,8 @@ export interface Candidate {
   heldShares: number;
   avgCost: number | null;
   newsTitles: string[];
+  dayRet?: number; // 前日の単日リターン(%)。キャピチュレーション(投げ売り)判定に使う
+  volRatio?: number; // 前日出来高 / 20日平均出来高。急落の本気度の確認に使う
 }
 
 export interface RuleParams {
@@ -44,6 +46,9 @@ export interface RuleParams {
   minPrice: number; // この株価未満の銘柄は対象外（ペニー株除外）
   momFloorOversold: number; // 20日モメンタムがこれ未満なら「売られすぎ反発」買いを見送る（落ちるナイフ回避）
   momCeiling: number; // 20日モメンタムがこれを超える過熱(パラボリック)は新規BUY見送り
+  capitDrop: number; // 前日がこの%以下の急落＝投げ売り(キャピチュレーション)。0で無効
+  capitVolMin: number; // 投げ売りと見なす出来高比の下限（×20日平均）
+  capitBoost: number; // キャピチュレーション買いのスコア加点
 }
 
 /** 既定パラメータ（元プロンプトのルールを素直に数値化した初期値）。 */
@@ -60,6 +65,9 @@ export const DEFAULT_PARAMS: RuleParams = {
   minPrice: 0,
   momFloorOversold: -100,
   momCeiling: 100000,
+  capitDrop: 0,
+  capitVolMin: 1.5,
+  capitBoost: 0.6,
 };
 
 /** チューニング後の推奨パラメータ（落ちるナイフ・ペニー株を抑制）。 */
@@ -76,6 +84,9 @@ export const TUNED_PARAMS: RuleParams = {
   minPrice: 10,
   momFloorOversold: -12,
   momCeiling: 80,
+  capitDrop: 0, // 既定は無効（実験8の検証後に効果が確認できれば有効化）
+  capitVolMin: 1.5,
+  capitBoost: 0.6,
 };
 
 const POS_WORDS = [
@@ -200,6 +211,21 @@ export function ruleDecide(
     ) {
       score += 0.6; // 順張り
       why.push("上昇トレンド順張り");
+    }
+    // キャピチュレーション買い: 前日が大幅安(出来高急増)＝投げ売りで、かつ中期は上昇基調
+    // (sma20>sma50)＝「上昇トレンド中の押し目の投げ売り」を逆張りで拾う。落ちるナイフ回避のため
+    // 中期上昇基調を必須にする。
+    if (
+      p.capitDrop < 0 &&
+      c.dayRet != null &&
+      c.dayRet <= p.capitDrop &&
+      (c.volRatio ?? 0) >= p.capitVolMin &&
+      c.sma20 != null &&
+      c.sma50 != null &&
+      c.sma20 > c.sma50
+    ) {
+      score += p.capitBoost;
+      why.push(`投げ売り拾い(${c.dayRet.toFixed(0)}%/出来高${(c.volRatio ?? 0).toFixed(1)}x)`);
     }
     if (sent > 0) {
       score += p.newsBoost * sent;

@@ -451,6 +451,12 @@ export async function runBacktest(
       const lookback = Math.min(20, closes.length - 1);
       const monthAgo = closes[closes.length - 1 - lookback];
       const momPct = ((lastClose - monthAgo) / monthAgo) * 100;
+      // 前日の単日リターンと出来高比（キャピチュレーション判定用）
+      const prevClose2 = closes.length >= 2 ? closes[closes.length - 2] : lastClose;
+      const dayRet = prevClose2 ? ((lastClose - prevClose2) / prevClose2) * 100 : 0;
+      const volWindow = past.slice(-21, -1);
+      const avgVol = volWindow.length ? volWindow.reduce((s, b) => s + b.volume, 0) / volWindow.length : 0;
+      const volRatio = avgVol > 0 ? past[past.length - 1].volume / avgVol : 0;
       const held = positions.get(t);
       const heldText = held
         ? ` [保有${held.shares}株 平均${held.avgCost.toFixed(2)}]`
@@ -485,6 +491,8 @@ export async function runBacktest(
         heldShares: held?.shares ?? 0,
         avgCost: held?.avgCost ?? null,
         newsTitles,
+        dayRet,
+        volRatio,
       });
       contextLines.push(
         `- ${t} 前日終値 ${lastClose.toFixed(2)} | RSI14 ${rsiLabel(rsi14)} | ` +
