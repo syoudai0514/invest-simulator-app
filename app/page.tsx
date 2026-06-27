@@ -19,32 +19,27 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
 import { EquityChart } from "@/components/equity-chart";
 import { jpy, pct, signedJpy, pnlColor } from "@/lib/format";
 import type { PortfolioResponse, MarketBlock, ActivityResponse, MarketActivity } from "@/lib/types";
-import { RefreshCw, Loader2, TrendingUp, ShieldCheck, ShieldAlert } from "lucide-react";
+import { RefreshCw, Loader2, TrendingUp, ShieldCheck, ShieldAlert, Bot } from "lucide-react";
 
 export default function Dashboard() {
   const [data, setData] = useState<PortfolioResponse | null>(null);
   const [act, setAct] = useState<ActivityResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [autoEnabled, setAutoEnabled] = useState(false);
-  const [intervalMin, setIntervalMin] = useState(5);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const intervalMin = 5; // 売買はGitHub Actionsが5分間隔で実行
 
   const load = useCallback(async () => {
     try {
-      const [p, s, a] = await Promise.all([
+      const [p, a] = await Promise.all([
         fetch("/api/portfolio").then((r) => r.json()),
-        fetch("/api/scheduler").then((r) => r.json()),
         fetch("/api/activity").then((r) => r.json()),
       ]);
       if (p.error) throw new Error(p.error);
       setData(p);
       setAct(a.error ? null : a);
-      setAutoEnabled(s.autoEnabled);
-      setIntervalMin(s.intervalMinutes);
       setUpdatedAt(new Date());
     } catch (e) {
       toast.error(`読み込み失敗: ${(e as Error).message}`);
@@ -61,16 +56,6 @@ export default function Dashboard() {
     }, 30000);
     return () => clearInterval(id);
   }, [load]);
-
-  async function toggleAuto(v: boolean) {
-    setAutoEnabled(v);
-    await fetch("/api/scheduler", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ autoEnabled: v }),
-    });
-    toast.success(v ? "自動売買をONにしました" : "自動売買をOFFにしました");
-  }
 
   if (loading) {
     return (
@@ -99,10 +84,9 @@ export default function Dashboard() {
           <Button variant="outline" size="sm" onClick={load}>
             <RefreshCw className="h-4 w-4" /> 更新
           </Button>
-          <div className="flex items-center gap-2 rounded-lg border px-3 py-1.5">
-            <span className="text-sm">{autoEnabled ? "自動売買 稼働中" : "自動売買 停止中"}</span>
-            <Switch checked={autoEnabled} onCheckedChange={toggleAuto} />
-          </div>
+          <Badge variant="outline" className="gap-1 py-1.5">
+            <Bot className="h-3.5 w-3.5" /> 売買は GitHub Actions が自動実行（{intervalMin}分間隔）
+          </Badge>
         </div>
       </div>
 
