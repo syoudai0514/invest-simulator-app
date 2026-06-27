@@ -22,7 +22,14 @@ const params = {
   ...(process.env.BT_RSISELL ? { rsiSell: Number(process.env.BT_RSISELL) } : {}),
   ...(process.env.BT_CAPIT ? { capitDrop: Number(process.env.BT_CAPIT) } : {}),
   ...(process.env.BT_CAPITBOOST ? { capitBoost: Number(process.env.BT_CAPITBOOST) } : {}),
+  ...(process.env.BT_MINPRICE ? { minPrice: Number(process.env.BT_MINPRICE) } : {}),
 };
+
+// 量子・宇宙テーマ銘柄（BT_THEME=1 でコア120に追加）
+const THEME_TICKERS = [
+  "IONQ", "RGTI", "QUBT", "QBTS", "ARQQ", // 量子
+  "RKLB", "ASTS", "MNTS", "ASTR", "SPCE", "RDW", "SATL", // 宇宙・衛星
+];
 
 const market = (process.argv[2] ?? "US") as "US" | "JP";
 const startDate = process.argv[3] ?? "2026-06-23";
@@ -49,10 +56,14 @@ function buildConfig(): BacktestConfig {
     };
   }
   const us = UNIVERSE_TICKERS.filter((t) => !t.endsWith(".T"));
+  const core = us.slice(0, limit || 120);
+  const tickers = process.env.BT_THEME === "1"
+    ? [...new Set([...core, ...THEME_TICKERS])]
+    : core;
   return {
     market: "US",
     currency: "USD",
-    tickers: us.slice(0, limit || 120),
+    tickers,
     benchmarkTicker: "SPY",
     startDate,
     endDate,
