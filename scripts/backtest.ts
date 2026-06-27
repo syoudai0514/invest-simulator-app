@@ -35,7 +35,8 @@ function buildConfig(): BacktestConfig {
       market: "JP",
       currency: "JPY",
       tickers: t,
-      benchmarkTicker: "1306.T",
+      // 日経225指数（分割等の不正プリントが無くレジーム信号・ベンチに適する）
+      benchmarkTicker: process.env.BT_BENCH || "^N225",
       startDate,
       endDate,
       initialCash: 1_000_000,
