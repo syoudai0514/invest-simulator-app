@@ -29,6 +29,7 @@ import {
   recordEquitySnapshot,
 } from "../lib/trading";
 import { setSetting } from "../lib/db";
+import { ruleDecide, TUNED_PARAMS, type Candidate as StratCandidate } from "../lib/strategy";
 
 const INITIAL_CASH = 1_000_000;
 const TOP_N = 15;
@@ -311,11 +312,149 @@ async function execute(targetDay: string, decisionsPath: string) {
   console.log(`\nブラウザ確認: npm run dev → http://localhost:3000`);
 }
 
+/**
+ * batch: ランダムな米国営業日を複数選び、本番ロジック（改善後）で1日収支を一括検証。
+ * 判断は ruleDecide（これまで手動適用してきた判断基準をコード化したもの）＋
+ * gap/parabolic自動ガード。約定=始値・評価=終値。各日は独立に初期100万円から開始。
+ * DBは汚さずメモリ内でシミュレートする（クランプは本番と同じ上限・現金下限を適用）。
+ */
+function makeRng(seed: number) {
+  let s = seed >>> 0;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+}
+
+async function batch(n: number, seed: number) {
+  const tickers = UNIVERSE_TICKERS.filter((t) => !t.endsWith(".T"));
+  const today = new Date();
+  // SPYの実営業日からランダム抽出（祝日・週末を自動回避）
+  const spyWideFrom = new Date(today.getTime() - 330 * 24 * 60 * 60 * 1000);
+  const spy = await getDailyBars("SPY", spyWideFrom, today);
+  // 指標に十分な履歴があるよう、古い側60本を除外した範囲から選ぶ
+  const pool = spy.slice(60).map((b) => b.date).filter((d) => d < today.toISOString().slice(0, 10));
+  const rng = makeRng(seed);
+  const chosen: string[] = [];
+  const poolCopy = [...pool];
+  while (chosen.length < n && poolCopy.length > 0) {
+    const i = Math.floor(rng() * poolCopy.length);
+    chosen.push(poolCopy.splice(i, 1)[0]);
+  }
+  chosen.sort();
+  console.log(`[batch] seed=${seed} ／ 抽出した${chosen.length}営業日: ${chosen.join(", ")}`);
+
+  // ユニバースの日足を一括取得（全対象日をカバーする1ウィンドウ）
+  const minDay = new Date(chosen[0] + "T00:00:00Z");
+  const fetchFrom = new Date(minDay.getTime() - 100 * 24 * 60 * 60 * 1000);
+  const fetchTo = today;
+  console.log(`[batch] ${tickers.length}銘柄の日足を一括取得中...`);
+  const barsByTicker = new Map<string, Bar[]>();
+  for (let i = 0; i < tickers.length; i += 20) {
+    const b = tickers.slice(i, i + 20);
+    const res = await Promise.all(b.map((t) => getDailyBars(t, fetchFrom, fetchTo)));
+    b.forEach((t, j) => barsByTicker.set(t, res[j]));
+    if (i + 20 < tickers.length) await new Promise((r) => setTimeout(r, 250));
+  }
+  const spyByDate = new Map(spy.map((b) => [b.date, b]));
+  const rate = await getUsdJpyRate();
+
+  const rows: { day: string; pnlPct: number; trades: number; investedPct: number; spyPct: number }[] = [];
+  for (const day of chosen) {
+    const dayDate = new Date(day + "T00:00:00Z");
+    // スクリーニング＋候補生成（フロス除外は MIN_PRICE / MIN_DOLLAR_VOLUME）
+    const scored: { ticker: string; score: number }[] = [];
+    for (const t of tickers) {
+      const bars = barsByTicker.get(t) ?? [];
+      const past = bars.filter((b) => b.date < day);
+      const todayBar = bars.find((b) => b.date === day);
+      if (past.length < 2 || !todayBar) continue;
+      const last = past[past.length - 1];
+      if (last.close < MIN_PRICE || last.close * last.volume < MIN_DOLLAR_VOLUME) continue;
+      const prev = past[past.length - 2];
+      const chg = ((last.close - prev.close) / prev.close) * 100;
+      scored.push({ ticker: t, score: Math.abs(chg) * Math.log10(Math.max(last.volume, 1)) });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    const screened = scored.slice(0, TOP_N).map((s) => s.ticker);
+
+    const maxPositionJpy = INITIAL_CASH * MAX_POSITION_PCT;
+    const cands: StratCandidate[] = [];
+    const openByTicker = new Map<string, { open: number; close: number; prevClose: number; mom: number }>();
+    for (const t of screened) {
+      const bars = barsByTicker.get(t) ?? [];
+      const past = bars.filter((b) => b.date < day);
+      const todayBar = bars.find((b) => b.date === day)!;
+      const closes = past.map((b) => b.close);
+      const { sma20, sma50, rsi14 } = summarize(closes);
+      const prevClose = closes[closes.length - 1];
+      const lookback = Math.min(20, closes.length - 1);
+      const momPct = ((prevClose - closes[closes.length - 1 - lookback]) / closes[closes.length - 1 - lookback]) * 100;
+      cands.push({
+        ticker: t, lastClose: prevClose, sma20, sma50, rsi14, momPct,
+        maxBuyShares: Math.max(0, Math.floor(maxPositionJpy / (prevClose * rate))),
+        heldShares: 0, avgCost: null, newsTitles: [],
+      });
+      openByTicker.set(t, { open: todayBar.open, close: todayBar.close, prevClose, mom: momPct });
+    }
+
+    const decisions = ruleDecide(cands, { cash: INITIAL_CASH, minCash: INITIAL_CASH * MIN_CASH_PCT, params: TUNED_PARAMS });
+
+    // メモリ内で約定（gap/parabolicガード＋本番同等のクランプ）
+    let cash = INITIAL_CASH;
+    const positions = new Map<string, { shares: number; avgJpy: number }>();
+    let trades = 0;
+    for (const d of decisions) {
+      if (d.action !== "BUY" || d.shares <= 0) continue;
+      const px = openByTicker.get(d.ticker);
+      if (!px) continue;
+      const gap = (px.open - px.prevClose) / px.prevClose;
+      if (gap > GAP_UP_MAX) continue; // 上ギャップ回避
+      if (px.mom > MOM_UP_MAX) continue; // パラボリック回避
+      const openJpy = px.open * rate;
+      const unit = openJpy * (1 + 0.0015);
+      const cap = Math.min(d.shares, maxPositionJpy / openJpy, cash / unit, (cash - INITIAL_CASH * MIN_CASH_PCT) / unit);
+      const sh = Math.floor(cap);
+      if (sh < 1) continue;
+      cash -= sh * unit;
+      positions.set(d.ticker, { shares: sh, avgJpy: openJpy });
+      trades++;
+    }
+    let holdClose = 0;
+    for (const [t, p] of positions) holdClose += (openByTicker.get(t)!.close * rate) * p.shares;
+    const total = cash + holdClose;
+    const pnlPct = ((total - INITIAL_CASH) / INITIAL_CASH) * 100;
+    const sb = spyByDate.get(day)!;
+    const spyPct = ((sb.close - sb.open) / sb.open) * 100;
+    rows.push({ day, pnlPct, trades, investedPct: ((INITIAL_CASH - cash) / INITIAL_CASH) * 100, spyPct });
+  }
+
+  // サマリ
+  console.log(`\n========== ランダム${rows.length}営業日の1日収支（改善後ロジック） ==========`);
+  console.log(`日付         収支%    取引  投資比%   SPY当日%   対SPY`);
+  for (const r of rows) {
+    const d = r.pnlPct - r.spyPct;
+    console.log(
+      `${r.day}  ${r.pnlPct >= 0 ? "+" : ""}${r.pnlPct.toFixed(2)}%   ${String(r.trades).padStart(2)}件   ${r.investedPct.toFixed(0).padStart(3)}%    ${r.spyPct >= 0 ? "+" : ""}${r.spyPct.toFixed(2)}%   ${d >= 0 ? "+" : ""}${d.toFixed(2)}pt`,
+    );
+  }
+  const avg = rows.reduce((s, r) => s + r.pnlPct, 0) / rows.length;
+  const avgSpy = rows.reduce((s, r) => s + r.spyPct, 0) / rows.length;
+  const winDays = rows.filter((r) => r.pnlPct > 0).length;
+  const beatSpy = rows.filter((r) => r.pnlPct > r.spyPct).length;
+  console.log(`\n平均収支: ${avg >= 0 ? "+" : ""}${avg.toFixed(2)}%／日 ｜ SPY平均: ${avgSpy >= 0 ? "+" : ""}${avgSpy.toFixed(2)}%／日`);
+  console.log(`勝ち越し日: ${winDays}/${rows.length} ｜ SPY超え日: ${beatSpy}/${rows.length}`);
+  console.log(`注: FXは現在レート(${rate.toFixed(2)})で固定近似・ニュース不使用・判断はruleDecide+自動ガード`);
+}
+
 async function main() {
   const mode = process.argv[2];
+  if (mode === "batch") {
+    const n = Number(process.argv[3]) || 5;
+    const seed = Number(process.argv[4]) || Math.floor(Math.random() * 1e9);
+    await batch(n, seed);
+    return;
+  }
   const targetDay = process.argv[3];
   if (!mode || !targetDay) {
-    console.error("使い方: simulate-day.ts <build|execute> <YYYY-MM-DD> [decisions.json]");
+    console.error("使い方: simulate-day.ts <build|execute|batch> <YYYY-MM-DD|N> [decisions.json|seed]");
     process.exit(1);
   }
   if (mode === "build") await build(targetDay);
