@@ -39,6 +39,7 @@ const NEWS_FRESH_DAYS = 7;
 const MIN_PRICE = 5; // 最低株価（ペニー株除外）
 const MIN_DOLLAR_VOLUME = 5_000_000; // 最低売買代金（流動性）
 const GAP_UP_MAX = 0.03; // 寄りが前日終値からこの率を超えて上ギャップしたBUYは見送る
+const MOM_UP_MAX = 80; // 20日モメンタムがこの%を超える過熱(パラボリック)銘柄は新規BUY見送り
 const SCRATCH =
   process.env.SIMDAY_DIR ||
   "C:/Users/syoud/AppData/Local/Temp/claude/c--dev-invest-simulator-app/b03211e9-517d-47f9-b664-b6ade7900286/scratchpad";
@@ -224,6 +225,7 @@ async function build(targetDay: string) {
   lines.push(`- 落ちるナイフ回避: 売られすぎでも20日モメンタムが大きくマイナス(≈-12%以下)は買わない`);
   lines.push(`- 低位株($5未満)・低流動性はスクリーニング段階で除外済み / 好材料はBUY寄り・悪材料はSELL寄り`);
   lines.push(`- 寄りで前日終値から+3%超の上ギャップ銘柄は失速を掴みやすいので新規BUY見送り（execute時に自動で弾く）`);
+  lines.push(`- 20日モメンタムが+80%超の過熱(パラボリック)銘柄は反落リスク大につき新規BUY見送り（execute時に自動で弾く）`);
   lines.push(`- 地合いが悪く良質な買い場が無い日は無理に買わず現金保持でよい`);
   lines.push(`- BUYは最大購入株数以内、現金10%維持、片道0.15%コスト考慮`);
   lines.push(``);
@@ -261,11 +263,15 @@ async function execute(targetDay: string, decisionsPath: string) {
     }
     const c = byTicker.get(d.ticker.toUpperCase());
     if (!c) { console.log(`  ✗ ${d.ticker}: 文脈に価格なし（候補外）→ スキップ`); continue; }
-    // 寄りで大きく上ギャップしたBUYは「ギャップ後の失速」を掴みやすいので見送る
+    // 寄りで大きく上ギャップ／過度に過熱(パラボリック)したBUYは失速・反落を掴みやすいので見送る
     if (d.action === "BUY") {
       const gap = (c.open - c.prevClose) / c.prevClose;
       if (gap > GAP_UP_MAX) {
         console.log(`  ✗ BUY ${d.ticker}: 寄り+${(gap * 100).toFixed(1)}%の上ギャップ（>${(GAP_UP_MAX * 100).toFixed(0)}%）につき見送り`);
+        continue;
+      }
+      if (c.momPct > MOM_UP_MAX) {
+        console.log(`  ✗ BUY ${d.ticker}: 20日+${c.momPct.toFixed(0)}%の過熱(パラボリック, >${MOM_UP_MAX}%)につき見送り`);
         continue;
       }
     }
