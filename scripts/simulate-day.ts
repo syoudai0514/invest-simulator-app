@@ -20,6 +20,7 @@ import { summarize } from "../lib/indicators";
 import { getUsdJpyRate } from "../lib/currency";
 import { getNewsForTickers } from "../lib/news";
 import { UNIVERSE_TICKERS } from "../lib/universe";
+import { JP_TICKERS } from "../lib/universe-jp";
 import {
   resetAccount,
   executeBuy,
@@ -323,12 +324,33 @@ function makeRng(seed: number) {
   return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
 }
 
-async function batch(n: number, seed: number) {
-  const tickers = UNIVERSE_TICKERS.filter((t) => !t.endsWith(".T"));
+async function batch(n: number, seed: number, market: "US" | "JP" = "US", useNews = false) {
+  const isJP = market === "JP";
+  const tickers = isJP ? JP_TICKERS : UNIVERSE_TICKERS.filter((t) => !t.endsWith(".T"));
+  const benchTicker = isJP ? "^N225" : "SPY";
   const today = new Date();
-  // SPYの実営業日からランダム抽出（祝日・週末を自動回避）
+  // ベンチの実営業日からランダム抽出（祝日・週末を自動回避）
   const spyWideFrom = new Date(today.getTime() - 330 * 24 * 60 * 60 * 1000);
-  const spy = await getDailyBars("SPY", spyWideFrom, today);
+  const spy = await getDailyBars(benchTicker, spyWideFrom, today);
+
+  // ニュース（取得できた分のみ・日付フィルタは日ごと）。古い日付ほど該当が減る点に留意。
+  const newsCache = new Map<string, { title: string; publishedAt: string }[]>();
+  async function newsFor(ticker: string, day: string): Promise<string[]> {
+    if (!newsCache.has(ticker)) {
+      try {
+        const res = await getNewsForTickers([ticker], true);
+        newsCache.set(ticker, (res[ticker] ?? []).map((h) => ({ title: h.title, publishedAt: h.publishedAt })));
+      } catch {
+        newsCache.set(ticker, []);
+      }
+    }
+    const dd = new Date(day + "T00:00:00Z");
+    const old = new Date(dd.getTime() - NEWS_FRESH_DAYS * 24 * 60 * 60 * 1000);
+    return (newsCache.get(ticker) ?? [])
+      .filter((n) => n.publishedAt && new Date(n.publishedAt) < dd && new Date(n.publishedAt) >= old)
+      .slice(0, 3)
+      .map((n) => n.title);
+  }
   // 指標に十分な履歴があるよう、古い側60本を除外した範囲から選ぶ
   const pool = spy.slice(60).map((b) => b.date).filter((d) => d < today.toISOString().slice(0, 10));
   const rng = makeRng(seed);
@@ -354,7 +376,8 @@ async function batch(n: number, seed: number) {
     if (i + 20 < tickers.length) await new Promise((r) => setTimeout(r, 250));
   }
   const spyByDate = new Map(spy.map((b) => [b.date, b]));
-  const rate = await getUsdJpyRate();
+  const rate = isJP ? 1 : await getUsdJpyRate();
+  let newsHits = 0;
 
   const rows: { day: string; pnlPct: number; trades: number; investedPct: number; spyPct: number }[] = [];
   for (const day of chosen) {
@@ -387,10 +410,12 @@ async function batch(n: number, seed: number) {
       const prevClose = closes[closes.length - 1];
       const lookback = Math.min(20, closes.length - 1);
       const momPct = ((prevClose - closes[closes.length - 1 - lookback]) / closes[closes.length - 1 - lookback]) * 100;
+      const newsTitles = useNews ? await newsFor(t, day) : [];
+      if (newsTitles.length > 0) newsHits++;
       cands.push({
         ticker: t, lastClose: prevClose, sma20, sma50, rsi14, momPct,
         maxBuyShares: Math.max(0, Math.floor(maxPositionJpy / (prevClose * rate))),
-        heldShares: 0, avgCost: null, newsTitles: [],
+        heldShares: 0, avgCost: null, newsTitles,
       });
       openByTicker.set(t, { open: todayBar.open, close: todayBar.close, prevClose, mom: momPct });
     }
@@ -427,8 +452,9 @@ async function batch(n: number, seed: number) {
   }
 
   // サマリ
-  console.log(`\n========== ランダム${rows.length}営業日の1日収支（改善後ロジック） ==========`);
-  console.log(`日付         収支%    取引  投資比%   SPY当日%   対SPY`);
+  const bLabel = isJP ? "N225" : "SPY";
+  console.log(`\n========== ${market} ランダム${rows.length}営業日の1日収支（改善後ロジック） ==========`);
+  console.log(`日付         収支%    取引  投資比%   ${bLabel}当日%   対${bLabel}`);
   for (const r of rows) {
     const d = r.pnlPct - r.spyPct;
     console.log(
@@ -439,9 +465,9 @@ async function batch(n: number, seed: number) {
   const avgSpy = rows.reduce((s, r) => s + r.spyPct, 0) / rows.length;
   const winDays = rows.filter((r) => r.pnlPct > 0).length;
   const beatSpy = rows.filter((r) => r.pnlPct > r.spyPct).length;
-  console.log(`\n平均収支: ${avg >= 0 ? "+" : ""}${avg.toFixed(2)}%／日 ｜ SPY平均: ${avgSpy >= 0 ? "+" : ""}${avgSpy.toFixed(2)}%／日`);
-  console.log(`勝ち越し日: ${winDays}/${rows.length} ｜ SPY超え日: ${beatSpy}/${rows.length}`);
-  console.log(`注: FXは現在レート(${rate.toFixed(2)})で固定近似・ニュース不使用・判断はruleDecide+自動ガード`);
+  console.log(`\n平均収支: ${avg >= 0 ? "+" : ""}${avg.toFixed(2)}%／日 ｜ ${bLabel}平均: ${avgSpy >= 0 ? "+" : ""}${avgSpy.toFixed(2)}%／日`);
+  console.log(`勝ち越し日: ${winDays}/${rows.length} ｜ ${bLabel}超え日: ${beatSpy}/${rows.length}`);
+  console.log(`注: 判断はruleDecide+自動ガード${useNews ? `・ニュース併用(該当銘柄日${newsHits}件)` : "・ニュース不使用"}${isJP ? "・JPY建て" : `・FX固定${rate.toFixed(1)}`}`);
 }
 
 async function main() {
@@ -449,7 +475,9 @@ async function main() {
   if (mode === "batch") {
     const n = Number(process.argv[3]) || 5;
     const seed = Number(process.argv[4]) || Math.floor(Math.random() * 1e9);
-    await batch(n, seed);
+    const market = (process.argv[5] || "US").toUpperCase() === "JP" ? "JP" : "US";
+    const useNews = process.argv.includes("news");
+    await batch(n, seed, market, useNews);
     return;
   }
   const targetDay = process.argv[3];
