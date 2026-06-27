@@ -328,13 +328,17 @@ export async function getPortfolioSummary(): Promise<PortfolioSummary> {
   };
 }
 
-/** 現在の総資産を equity_snapshots に記録する。 */
-export function recordEquitySnapshot(totalValueJpy: number, cashJpy: number) {
+/** 現在の総資産を equity_snapshots に記録する（ベンチマーク評価額は任意）。 */
+export function recordEquitySnapshot(
+  totalValueJpy: number,
+  cashJpy: number,
+  benchmarkValueJpy?: number | null,
+) {
   getDb()
     .prepare(
-      "INSERT INTO equity_snapshots (total_value_jpy, cash_jpy) VALUES (?, ?)",
+      "INSERT INTO equity_snapshots (total_value_jpy, cash_jpy, benchmark_value_jpy) VALUES (?, ?, ?)",
     )
-    .run(totalValueJpy, cashJpy);
+    .run(totalValueJpy, cashJpy, benchmarkValueJpy ?? null);
 }
 
 /** 資金をリセットして全保有・履歴を消去する。 */

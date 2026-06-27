@@ -72,6 +72,40 @@ function migrate(db: DatabaseSync) {
       benchmark_value_jpy REAL,            -- 同額をSPYでbuy&holdした場合の評価額（円）
       created_at      TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- 売買サイクルのログ（フィードバック分析用）
+    CREATE TABLE IF NOT EXISTS cycle_log (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ran_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      engine      TEXT NOT NULL,           -- rule | llm
+      risk_off    INTEGER NOT NULL DEFAULT 0, -- レジーム: リスクオフなら1
+      market_open INTEGER NOT NULL DEFAULT 1, -- 米国市場が開いていたか
+      screened    TEXT,                    -- スクリーニング結果(JSON配列)
+      decisions   INTEGER NOT NULL DEFAULT 0, -- 判断件数
+      executed    INTEGER NOT NULL DEFAULT 0, -- 約定件数
+      total_value_jpy REAL,                -- サイクル後の総資産
+      cash_jpy    REAL,                    -- サイクル後の現金
+      note        TEXT
+    );
+
+    -- 各判断の詳細ログ（HOLD・却下も含む全件・後から検証するため指標も保存）
+    CREATE TABLE IF NOT EXISTS decision_log (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ran_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      ticker      TEXT NOT NULL,
+      action      TEXT NOT NULL,           -- BUY | SELL | HOLD
+      shares      REAL NOT NULL DEFAULT 0,
+      executed    INTEGER NOT NULL DEFAULT 0,
+      reject_reason TEXT,
+      reasoning   TEXT,
+      price_jpy   REAL,                    -- 判断時の円換算価格
+      rsi14       REAL,
+      sma20       REAL,
+      sma50       REAL,
+      mom_pct     REAL,                    -- 20日モメンタム
+      day_ret     REAL,                    -- 前日単日リターン
+      pnl_pct     REAL                     -- 保有銘柄の含み損益率（SELL/HOLD時）
+    );
   `);
 
   // 既存DBへの後付けマイグレーション（列が無ければ追加）
@@ -146,4 +180,61 @@ export function setSetting(key: string, value: string): void {
       "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .run(key, value);
+}
+
+/* ---------- フィードバック用ログ ---------- */
+
+export interface DecisionLogRow {
+  ticker: string;
+  action: "BUY" | "SELL" | "HOLD";
+  shares: number;
+  executed: boolean;
+  rejectReason?: string | null;
+  reasoning?: string | null;
+  priceJpy?: number | null;
+  rsi14?: number | null;
+  sma20?: number | null;
+  sma50?: number | null;
+  momPct?: number | null;
+  dayRet?: number | null;
+  pnlPct?: number | null;
+}
+
+export function logDecision(d: DecisionLogRow): void {
+  getDb()
+    .prepare(
+      `INSERT INTO decision_log
+        (ticker, action, shares, executed, reject_reason, reasoning, price_jpy, rsi14, sma20, sma50, mom_pct, day_ret, pnl_pct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      d.ticker, d.action, d.shares, d.executed ? 1 : 0,
+      d.rejectReason ?? null, d.reasoning ?? null, d.priceJpy ?? null,
+      d.rsi14 ?? null, d.sma20 ?? null, d.sma50 ?? null,
+      d.momPct ?? null, d.dayRet ?? null, d.pnlPct ?? null,
+    );
+}
+
+export function logCycle(c: {
+  engine: string;
+  riskOff: boolean;
+  marketOpen: boolean;
+  screened: string[];
+  decisions: number;
+  executed: number;
+  totalValueJpy: number;
+  cashJpy: number;
+  note?: string;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO cycle_log
+        (engine, risk_off, market_open, screened, decisions, executed, total_value_jpy, cash_jpy, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      c.engine, c.riskOff ? 1 : 0, c.marketOpen ? 1 : 0,
+      JSON.stringify(c.screened), c.decisions, c.executed,
+      c.totalValueJpy, c.cashJpy, c.note ?? null,
+    );
 }

@@ -2,8 +2,10 @@ name: Auto Trade
 
 on:
   schedule:
-    # 米国市場時間 UTC 13:30-20:00（日本時間 22:30-翌5:00）火〜土
-    - cron: "*/5 13-20 * * 2-6"
+    # 米国市場の取引日(月〜金, UTC曜日1-5)・市場時間帯 UTC 13:00-20:59 に5分ごと。
+    # 実際の開場判定は lib/market.getUsMarketStatus がET基準で行い、時間外は記録のみ。
+    # 冬時間(EST)で 21:00 UTC まで開くため 13-21 を確保。
+    - cron: "*/5 13-21 * * 1-5"
   workflow_dispatch:
 
 # DB をリポジトリにコミットし戻すため書き込み権限が必要
@@ -29,10 +31,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # 本番は決定論ルールエンジン（lib/rule-trade）で動作。GROQ等のLLMキーは不要。
       - name: Run trade cycle
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_MODEL: llama-3.3-70b-versatile
         run: npm run trade
 
       - name: Commit updated database

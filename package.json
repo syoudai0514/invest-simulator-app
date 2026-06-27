@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "trade": "tsx scripts/trade.ts"
+    "trade": "tsx scripts/trade.ts",
+    "reset-live": "tsx --env-file=.env.local scripts/reset-live.ts",
+    "report": "tsx --env-file=.env.local scripts/report.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.106.0",
