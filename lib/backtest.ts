@@ -126,6 +126,12 @@ const TRAIL_PCT = process.env.BT_TRAIL ? Number(process.env.BT_TRAIL) : 0;
 // 最も頑健な改善だったため既定でON（BT_REGIME=0 で無効化可）。
 const REGIME_ON = process.env.BT_REGIME !== "0";
 const REGIME_SMA = Number(process.env.BT_REGIME_SMA) || 20;
+// 「好材料急騰で売り→押し目で買い戻し」オーバーレイ。BT_SURGE_EXIT=0 で無効。
+// 保有株が前日に +SURGE_EXIT% 急騰したら翌寄りで売り、売値から REBUY_DROP% 下げたら
+// REBUY_DAYS 営業日以内に買い戻す（来なければ見送り）。
+const SURGE_EXIT_PCT = process.env.BT_SURGE_EXIT ? Number(process.env.BT_SURGE_EXIT) : 0;
+const REBUY_DROP_PCT = process.env.BT_REBUY_DROP ? Number(process.env.BT_REBUY_DROP) : 5;
+const REBUY_DAYS = process.env.BT_REBUY_DAYS ? Number(process.env.BT_REBUY_DAYS) : 5;
 
 interface AiDecision {
   ticker: string;
@@ -328,6 +334,8 @@ export async function runBacktest(
   const stoppedAtIdx = new Map<string, number>(); // 損切りした銘柄→その営業日インデックス
   const COOLDOWN_DAYS = 5; // 損切り後、再エントリーを禁止する営業日数
   const peakByTicker = new Map<string, number>(); // 保有中の最高値（トレーリング用）
+  // 「好材料急騰で売り→押し目で買い戻し」の買い戻し待ち（ticker→売値・売却日・株数）
+  const rebuyWatch = new Map<string, { sellOpen: number; idx: number; shares: number }>();
   let dayIdx = -1;
 
   for (const day of tradingDays) {
@@ -353,14 +361,29 @@ export async function runBacktest(
       peakByTicker.set(ticker, peak);
       const pnlPct = ((bar.open - pos.avgCost) / pos.avgCost) * 100;
       const fromPeakPct = ((bar.open - peak) / peak) * 100;
+      // 前日の単日リターン（好材料急騰の代理シグナル）
+      let surge = 0;
+      if (SURGE_EXIT_PCT > 0) {
+        const past = (barsByTicker.get(ticker) ?? []).filter((b) => b.date < dayDate);
+        if (past.length >= 2) {
+          const a = past[past.length - 1], b = past[past.length - 2];
+          surge = ((a.close - b.close) / b.close) * 100;
+        }
+      }
       let reason = "";
+      let isSurge = false;
       if (pnlPct <= STOP_LOSS_PCT) reason = `自動損切り(${pnlPct.toFixed(1)}%)`;
       else if (TRAIL_PCT > 0 && pnlPct > 0 && fromPeakPct <= -TRAIL_PCT)
         reason = `トレーリング手仕舞い(ピーク比${fromPeakPct.toFixed(1)}%)`;
-      else if (pnlPct >= TAKE_PROFIT_PCT) reason = `自動利確(${pnlPct.toFixed(1)}%)`;
+      else if (SURGE_EXIT_PCT > 0 && surge >= SURGE_EXIT_PCT) {
+        reason = `好材料急騰に売り(+${surge.toFixed(1)}%)`;
+        isSurge = true;
+      } else if (pnlPct >= TAKE_PROFIT_PCT) reason = `自動利確(${pnlPct.toFixed(1)}%)`;
       if (reason) {
+        const soldShares = pos.shares;
         const r = sell(ticker, pos.shares, bar.open, day, reason);
         if (r.ok && reason.startsWith("自動損切り")) stoppedAtIdx.set(ticker, dayIdx);
+        if (r.ok && isSurge) rebuyWatch.set(ticker, { sellOpen: bar.open, idx: dayIdx, shares: soldShares });
         decisionLog.push({
           date: day,
           ticker,
@@ -395,6 +418,24 @@ export async function runBacktest(
       maxPositionJpy: totalValue * MAX_POSITION_PCT,
       minCashJpy: totalValue * MIN_CASH_PCT,
     };
+
+    // 1.5) 買い戻し処理（好材料急騰で売った銘柄が押し目を付けたら買い戻す）
+    if (SURGE_EXIT_PCT > 0 && rebuyWatch.size > 0) {
+      for (const [ticker, w] of [...rebuyWatch.entries()]) {
+        if (dayIdx - w.idx > REBUY_DAYS) { rebuyWatch.delete(ticker); continue; } // 期限切れ
+        const bar = todayBar(ticker);
+        if (!bar) continue;
+        const target = w.sellOpen * (1 - REBUY_DROP_PCT / 100);
+        if (bar.open <= target) {
+          const r = buy(ticker, w.shares, bar.open, day, `押し目買い戻し(売値${w.sellOpen.toFixed(2)}→${bar.open.toFixed(2)})`, limits);
+          decisionLog.push({
+            date: day, ticker, action: "BUY", shares: w.shares,
+            reasoning: `押し目買い戻し`, executed: r.ok, rejectReason: r.ok ? undefined : r.reason,
+          });
+          rebuyWatch.delete(ticker);
+        }
+      }
+    }
 
     // 3) 指標＋ニュースの構造化スナップショット
     const snapshots: Candidate[] = [];
