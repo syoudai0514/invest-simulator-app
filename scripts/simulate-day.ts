@@ -143,7 +143,7 @@ async function build(targetDay: string) {
 
   const rate = await getUsdJpyRate();
   console.log(`[simulate-day:build] USDJPY≈${rate.toFixed(2)} ／ 口座を初期${INITIAL_CASH.toLocaleString()}円にリセット`);
-  resetAccount(INITIAL_CASH);
+  resetAccount("US", INITIAL_CASH);
 
   // スクリーニング（対象日より前の終値で |騰落率|×log10(出来高)）
   const scored: { ticker: string; score: number }[] = [];
@@ -256,7 +256,7 @@ async function execute(targetDay: string, decisionsPath: string) {
   const rate = ctx.rate;
   const limits = { maxPositionJpy: INITIAL_CASH * MAX_POSITION_PCT, minCashJpy: INITIAL_CASH * MIN_CASH_PCT };
 
-  console.log(`\n[simulate-day:execute] 対象日=${targetDay} ／ 開始現金 ${getCash().toLocaleString()}円`);
+  console.log(`\n[simulate-day:execute] 対象日=${targetDay} ／ 開始現金 ${getCash("US").toLocaleString()}円`);
   console.log(`--- 約定（当日始値で執行） ---`);
   for (const d of decRaw.decisions) {
     if (d.action === "HOLD" || d.shares <= 0) {
@@ -285,8 +285,8 @@ async function execute(targetDay: string, decisionsPath: string) {
   }
 
   // 当日終値で評価
-  const cash = getCash();
-  const holdings = getHoldings();
+  const cash = getCash("US");
+  const holdings = getHoldings("US");
   let holdingsClose = 0;
   console.log(`\n--- 当日終値での保有評価 ---`);
   for (const h of holdings) {
@@ -303,8 +303,8 @@ async function execute(targetDay: string, decisionsPath: string) {
   }
   const total = cash + holdingsClose;
   const pnl = total - INITIAL_CASH;
-  recordEquitySnapshot(total, cash);
-  setSetting("initial_cash", String(INITIAL_CASH));
+  recordEquitySnapshot("US", total, cash);
+  setSetting("initial_cash_US", String(INITIAL_CASH));
 
   console.log(`\n========== ${targetDay} の1日収支 ==========`);
   console.log(`開始: ${INITIAL_CASH.toLocaleString()}円`);

@@ -16,6 +16,7 @@ export interface HoldingValuation {
 export interface EquitySnapshot {
   total: number;
   cash: number;
+  benchmark?: number | null;
   createdAt: string;
 }
 
@@ -25,7 +26,9 @@ export interface NewsStatus {
   tickerCount: number;
 }
 
-export interface PortfolioResponse {
+/** 1市場ぶんのポートフォリオ＋資産推移。 */
+export interface MarketBlock {
+  market: "US" | "JP";
   cashJpy: number;
   holdings: HoldingValuation[];
   holdingsValueJpy: number;
@@ -34,6 +37,21 @@ export interface PortfolioResponse {
   totalPnlJpy: number;
   totalPnlPct: number;
   snapshots: EquitySnapshot[];
+}
+
+/** 両市場の合算サマリ（ダッシュボード上部）。 */
+export interface CombinedSummary {
+  totalValueJpy: number;
+  cashJpy: number;
+  holdingsValueJpy: number;
+  initialCash: number;
+  totalPnlJpy: number;
+  totalPnlPct: number;
+}
+
+export interface PortfolioResponse {
+  combined: CombinedSummary;
+  markets: { US: MarketBlock; JP: MarketBlock };
   newsStatus: NewsStatus;
 }
 

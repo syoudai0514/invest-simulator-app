@@ -131,9 +131,9 @@ const DECISION_TOOL: Groq.Chat.Completions.ChatCompletionTool = {
 };
 
 export async function getAiDecisions(): Promise<AiDecision[]> {
-  // 1時間に1度スクリーニングを実行して対象銘柄を更新
-  await runScreener();
-  let tickers = getScreenedTickers();
+  // 1時間に1度スクリーニングを実行して対象銘柄を更新（旧LLM経路は米国のみ）
+  await runScreener("US");
+  let tickers = getScreenedTickers("US");
 
   // スクリーナー結果がない場合はウォッチリストにフォールバック
   if (tickers.length === 0) {
@@ -151,9 +151,9 @@ export async function getAiDecisions(): Promise<AiDecision[]> {
   const news = await getNewsForTickers(quotes.map((q) => q.ticker));
 
   const marketContext = await buildMarketContext(quotes, news);
-  const summary = await getPortfolioSummary();
-  const cash = getCash();
-  const holdings = getHoldings();
+  const summary = await getPortfolioSummary("US");
+  const cash = getCash("US");
+  const holdings = getHoldings("US");
   const holdingsText =
     holdings.length > 0
       ? holdings
@@ -252,7 +252,7 @@ export async function runAiTradeCycle(): Promise<AiTradeCycleResult> {
   const executed: TradeResult[] = [];
 
   // BUYに渡すポジション上限・現金下限（executeBuy側でこの枠に株数をクランプする）
-  const preSummary = await getPortfolioSummary();
+  const preSummary = await getPortfolioSummary("US");
   const limits = {
     maxPositionJpy: preSummary.totalValueJpy * MAX_POSITION_PCT,
     minCashJpy: preSummary.totalValueJpy * MIN_CASH_PCT,
@@ -285,8 +285,8 @@ export async function runAiTradeCycle(): Promise<AiTradeCycleResult> {
   }
 
   try {
-    const summary = await getPortfolioSummary();
-    recordEquitySnapshot(summary.totalValueJpy, summary.cashJpy);
+    const summary = await getPortfolioSummary("US");
+    recordEquitySnapshot("US", summary.totalValueJpy, summary.cashJpy);
   } catch {
     // スナップショット失敗は無視
   }

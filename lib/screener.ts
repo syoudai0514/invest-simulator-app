@@ -4,8 +4,15 @@
  * - 選定基準: 当日変動率の絶対値 × 出来高スコア
  */
 import { getDb } from "./db";
-import { getQuotes } from "./yahoo";
+import { getQuotes, type Market } from "./yahoo";
 import { UNIVERSE_TICKERS } from "./universe";
+import { JP_TICKERS } from "./universe-jp";
+
+function universeFor(market: Market): string[] {
+  return market === "JP"
+    ? JP_TICKERS
+    : UNIVERSE_TICKERS.filter((t) => !t.endsWith(".T"));
+}
 
 const SCREEN_INTERVAL_MS = 60 * 60 * 1000; // 1時間
 const TOP_N = 20;
@@ -23,23 +30,23 @@ export interface ScreenedStock {
   volume: number;
 }
 
-function getLastScreened(): Date | null {
+function getLastScreened(market: Market): Date | null {
   const db = getDb();
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'last_screened'").get() as { value: string } | undefined;
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(`last_screened_${market}`) as { value: string } | undefined;
   if (!row) return null;
   return new Date(row.value);
 }
 
-function saveScreened(tickers: string[]) {
+function saveScreened(market: Market, tickers: string[]) {
   const db = getDb();
   const now = new Date().toISOString();
-  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_screened', ?)").run(now);
-  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('screened_tickers', ?)").run(JSON.stringify(tickers));
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(`last_screened_${market}`, now);
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(`screened_tickers_${market}`, JSON.stringify(tickers));
 }
 
-export function getScreenedTickers(): string[] {
+export function getScreenedTickers(market: Market): string[] {
   const db = getDb();
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'screened_tickers'").get() as { value: string } | undefined;
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(`screened_tickers_${market}`) as { value: string } | undefined;
   if (!row) return [];
   try {
     return JSON.parse(row.value) as string[];
@@ -48,21 +55,22 @@ export function getScreenedTickers(): string[] {
   }
 }
 
-export async function runScreener(force = false): Promise<string[]> {
-  const lastScreened = getLastScreened();
+export async function runScreener(market: Market, force = false): Promise<string[]> {
+  const lastScreened = getLastScreened(market);
   const now = Date.now();
 
   if (!force && lastScreened && now - lastScreened.getTime() < SCREEN_INTERVAL_MS) {
-    console.log(`[screener] スキップ（前回: ${lastScreened.toISOString()}）`);
-    return getScreenedTickers();
+    console.log(`[screener:${market}] スキップ（前回: ${lastScreened.toISOString()}）`);
+    return getScreenedTickers(market);
   }
 
-  console.log("[screener] スクリーニング開始...");
+  console.log(`[screener:${market}] スクリーニング開始...`);
   const scores: ScreenedStock[] = [];
+  const universe = universeFor(market);
 
   // バッチで取得（レート制限対策）
-  for (let i = 0; i < UNIVERSE_TICKERS.length; i += BATCH_SIZE) {
-    const batch = UNIVERSE_TICKERS.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < universe.length; i += BATCH_SIZE) {
+    const batch = universe.slice(i, i + BATCH_SIZE);
     try {
       const quotes = await getQuotes(batch);
       for (const q of quotes) {
@@ -75,10 +83,10 @@ export async function runScreener(force = false): Promise<string[]> {
         scores.push({ ticker: q.ticker, score, changePercent: q.changePercent, volume: q.volume });
       }
     } catch (e) {
-      console.warn(`[screener] バッチ ${i}-${i + BATCH_SIZE} 取得失敗:`, e);
+      console.warn(`[screener:${market}] バッチ ${i}-${i + BATCH_SIZE} 取得失敗:`, e);
     }
     // バッチ間に少し待機
-    if (i + BATCH_SIZE < UNIVERSE_TICKERS.length) {
+    if (i + BATCH_SIZE < universe.length) {
       await new Promise((r) => setTimeout(r, 500));
     }
   }
@@ -87,12 +95,12 @@ export async function runScreener(force = false): Promise<string[]> {
   scores.sort((a, b) => b.score - a.score);
   const top = scores.slice(0, TOP_N);
 
-  console.log("[screener] トップ銘柄:");
+  console.log(`[screener:${market}] トップ銘柄:`);
   for (const s of top) {
     console.log(`  ${s.ticker}: score=${s.score.toFixed(2)} change=${s.changePercent.toFixed(2)}% vol=${s.volume.toLocaleString()}`);
   }
 
   const tickers = top.map((s) => s.ticker);
-  saveScreened(tickers);
+  saveScreened(market, tickers);
   return tickers;
 }

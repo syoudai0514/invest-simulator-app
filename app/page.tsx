@@ -22,18 +22,14 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { EquityChart } from "@/components/equity-chart";
 import { jpy, pct, signedJpy, pnlColor } from "@/lib/format";
-import type {
-  PortfolioResponse,
-  AiTradeCycleResult,
-} from "@/lib/types";
-import { Bot, RefreshCw, Loader2, TrendingUp, Newspaper } from "lucide-react";
+import type { PortfolioResponse, MarketBlock } from "@/lib/types";
+import { RefreshCw, Loader2, TrendingUp } from "lucide-react";
 
 export default function Dashboard() {
   const [data, setData] = useState<PortfolioResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [aiRunning, setAiRunning] = useState(false);
   const [autoEnabled, setAutoEnabled] = useState(false);
-  const [intervalMin, setIntervalMin] = useState(60);
+  const [intervalMin, setIntervalMin] = useState(5);
 
   const load = useCallback(async () => {
     try {
@@ -56,25 +52,6 @@ export default function Dashboard() {
     load();
   }, [load]);
 
-  async function runAi() {
-    setAiRunning(true);
-    toast.info("Claude が市場を分析しています…");
-    try {
-      const res = await fetch("/api/ai-trade", { method: "POST" });
-      const json: AiTradeCycleResult & { error?: string } = await res.json();
-      if (json.error) throw new Error(json.error);
-      toast.success(json.summaryNote);
-      for (const ex of json.executed) {
-        if (ex.ok) toast.success(ex.message);
-      }
-      await load();
-    } catch (e) {
-      toast.error(`AI売買失敗: ${(e as Error).message}`);
-    } finally {
-      setAiRunning(false);
-    }
-  }
-
   async function toggleAuto(v: boolean) {
     setAutoEnabled(v);
     await fetch("/api/scheduler", {
@@ -94,162 +71,108 @@ export default function Dashboard() {
   }
   if (!data) return null;
 
+  const { combined, markets } = data;
+
   return (
     <div className="space-y-6">
-      {/* ヘッダー行 */}
+      {/* ヘッダー */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">ダッシュボード</h1>
           <p className="text-sm text-muted-foreground">
-            仮想資金で Claude の運用成果を確認
+            米国・日本の2市場をそれぞれ仮想資金100万円でルールエンジンが自動運用
           </p>
         </div>
         <div className="flex items-center gap-3">
           <Button variant="outline" size="sm" onClick={load}>
             <RefreshCw className="h-4 w-4" /> 更新
           </Button>
-          <Button onClick={runAi} disabled={aiRunning}>
-            {aiRunning ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Bot className="h-4 w-4" />
-            )}
-            今すぐClaudeに判断させる
-          </Button>
+          <div className="flex items-center gap-2 rounded-lg border px-3 py-1.5">
+            <span className="text-sm">{autoEnabled ? "自動売買 稼働中" : "自動売買 停止中"}</span>
+            <Switch checked={autoEnabled} onCheckedChange={toggleAuto} />
+          </div>
         </div>
       </div>
 
-      {/* サマリカード */}
+      {/* 合算サマリ */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <SummaryCard title="総資産" value={jpy(data.totalValueJpy)} />
-        <SummaryCard title="現金残高" value={jpy(data.cashJpy)} />
-        <SummaryCard title="保有評価額" value={jpy(data.holdingsValueJpy)} />
+        <SummaryCard title="合計総資産" value={jpy(combined.totalValueJpy)} sub={`初期 ${jpy(combined.initialCash)}`} />
+        <SummaryCard title="合計現金" value={jpy(combined.cashJpy)} />
+        <SummaryCard title="合計保有評価" value={jpy(combined.holdingsValueJpy)} />
         <SummaryCard
-          title="トータル損益"
-          value={signedJpy(data.totalPnlJpy)}
-          sub={pct(data.totalPnlPct)}
-          color={pnlColor(data.totalPnlJpy)}
+          title="合計損益"
+          value={signedJpy(combined.totalPnlJpy)}
+          sub={pct(combined.totalPnlPct)}
+          color={pnlColor(combined.totalPnlJpy)}
         />
       </div>
 
-      {/* 資産推移 + 自動売買 */}
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <TrendingUp className="h-4 w-4 text-emerald-500" /> 資産推移
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <EquityChart
-              snapshots={data.snapshots}
-              initialCash={data.initialCash}
-            />
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">自動売買</CardTitle>
-            <CardDescription>
-              サーバー稼働中、設定間隔ごとに Claude が自動で判断します
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between rounded-lg border p-3">
-              <div>
-                <p className="font-medium">自動売買</p>
-                <p className="text-xs text-muted-foreground">
-                  {autoEnabled ? "稼働中" : "停止中"} ・ {intervalMin}分間隔
-                </p>
-              </div>
-              <Switch checked={autoEnabled} onCheckedChange={toggleAuto} />
-            </div>
-            <div className="flex items-center justify-between rounded-lg border p-3">
-              <div className="flex items-center gap-2">
-                <Newspaper className="h-4 w-4 text-muted-foreground" />
-                <div>
-                  <p className="font-medium">本日のニュース確認</p>
-                  <p className="text-xs text-muted-foreground">
-                    {data.newsStatus.lastChecked
-                      ? `最終確認 ${new Date(data.newsStatus.lastChecked).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}・${data.newsStatus.tickerCount}銘柄`
-                      : "未確認"}
-                  </p>
-                </div>
-              </div>
-              <Badge variant={data.newsStatus.checkedToday ? "default" : "outline"}>
-                {data.newsStatus.checkedToday ? "確認済み" : "未確認"}
-              </Badge>
-            </div>
-            <div className="rounded-lg bg-muted/50 p-3 text-xs text-muted-foreground">
-              初期資金 {jpy(data.initialCash)} からスタート。間隔の変更は「設定」ページから。
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* 保有銘柄 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">保有銘柄</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {data.holdings.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              保有銘柄はありません。「売買・チャート」または上のAIボタンから取引を始めましょう。
-            </p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>銘柄</TableHead>
-                  <TableHead className="text-right">株数</TableHead>
-                  <TableHead className="text-right">平均取得</TableHead>
-                  <TableHead className="text-right">現在値</TableHead>
-                  <TableHead className="text-right">評価額</TableHead>
-                  <TableHead className="text-right">評価損益</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.holdings.map((h) => (
-                  <TableRow key={h.ticker}>
-                    <TableCell className="font-medium">
-                      <div className="flex items-center gap-1.5">
-                        {h.ticker}
-                        <Badge variant="outline" className="text-[10px]">
-                          {h.market}
-                        </Badge>
-                      </div>
-                      <span className="block text-xs font-normal text-muted-foreground">
-                        {h.name}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-right">{h.shares}</TableCell>
-                    <TableCell className="text-right">
-                      {jpy(h.avgCostJpy)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {jpy(h.currentPriceJpy)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {jpy(h.marketValueJpy)}
-                    </TableCell>
-                    <TableCell
-                      className={`text-right font-medium ${pnlColor(h.unrealizedPnlJpy)}`}
-                    >
-                      {signedJpy(h.unrealizedPnlJpy)}
-                      <span className="block text-xs">
-                        {pct(h.unrealizedPnlPct)}
-                      </span>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      {/* 市場別セクション */}
+      <MarketSection label="🇺🇸 米国市場" block={markets.US} interval={intervalMin} />
+      <MarketSection label="🇯🇵 日本市場" block={markets.JP} interval={intervalMin} />
     </div>
+  );
+}
+
+function MarketSection({ label, block, interval }: { label: string; block: MarketBlock; interval: number }) {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="text-base">{label}</CardTitle>
+          <div className="flex items-center gap-4 text-sm">
+            <span className="text-muted-foreground">総資産 <b className="text-foreground tabular-nums">{jpy(block.totalValueJpy)}</b></span>
+            <span className="text-muted-foreground">現金 <b className="text-foreground tabular-nums">{jpy(block.cashJpy)}</b></span>
+            <span className={`font-medium tabular-nums ${pnlColor(block.totalPnlJpy)}`}>
+              {signedJpy(block.totalPnlJpy)}（{pct(block.totalPnlPct)}）
+            </span>
+          </div>
+        </div>
+        <CardDescription>初期 {jpy(block.initialCash)} ・ {interval}分間隔で自動判断</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <div className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <TrendingUp className="h-3.5 w-3.5 text-emerald-500" /> 資産推移
+          </div>
+          <EquityChart snapshots={block.snapshots} initialCash={block.initialCash} />
+        </div>
+        {block.holdings.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">保有銘柄はありません</p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>銘柄</TableHead>
+                <TableHead className="text-right">株数</TableHead>
+                <TableHead className="text-right">平均取得</TableHead>
+                <TableHead className="text-right">現在値</TableHead>
+                <TableHead className="text-right">評価額</TableHead>
+                <TableHead className="text-right">評価損益</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {block.holdings.map((h) => (
+                <TableRow key={h.ticker}>
+                  <TableCell className="font-medium">
+                    {h.ticker}
+                    <span className="block text-xs font-normal text-muted-foreground">{h.name}</span>
+                  </TableCell>
+                  <TableCell className="text-right">{h.shares}</TableCell>
+                  <TableCell className="text-right">{jpy(h.avgCostJpy)}</TableCell>
+                  <TableCell className="text-right">{jpy(h.currentPriceJpy)}</TableCell>
+                  <TableCell className="text-right">{jpy(h.marketValueJpy)}</TableCell>
+                  <TableCell className={`text-right font-medium ${pnlColor(h.unrealizedPnlJpy)}`}>
+                    {signedJpy(h.unrealizedPnlJpy)}
+                    <span className="block text-xs">{pct(h.unrealizedPnlPct)}</span>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -268,9 +191,7 @@ function SummaryCard({
     <Card>
       <CardHeader className="pb-2">
         <CardDescription>{title}</CardDescription>
-        <CardTitle className={`text-2xl tabular-nums ${color ?? ""}`}>
-          {value}
-        </CardTitle>
+        <CardTitle className={`text-2xl tabular-nums ${color ?? ""}`}>{value}</CardTitle>
       </CardHeader>
       {sub && (
         <CardContent className="pt-0">

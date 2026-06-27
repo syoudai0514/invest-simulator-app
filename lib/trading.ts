@@ -1,8 +1,13 @@
 import { getDb, getSetting } from "./db";
-import { getQuote, getQuotes, detectMarket } from "./yahoo";
+import { getQuote, getQuotes, detectMarket, type Market } from "./yahoo";
 
 export type TradeAction = "BUY" | "SELL";
 export type TradeSource = "AI" | "MANUAL";
+
+/** 初期資金の設定キー（市場別）。 */
+export function initialCashKey(market: Market): string {
+  return `initial_cash_${market}`;
+}
 
 /** 売買コスト（手数料＋スプレッド）の片道レート。 */
 export const TRADE_COST_RATE = 0.0015;
@@ -60,23 +65,27 @@ export interface TradeResult {
 
 /* ---------- 残高・保有 ---------- */
 
-export function getCash(): number {
+export function getCash(market: Market): number {
   const row = getDb()
-    .prepare("SELECT cash_jpy FROM account WHERE id = 1")
-    .get() as { cash_jpy: number } | undefined;
+    .prepare("SELECT cash_jpy FROM accounts WHERE market = ?")
+    .get(market) as { cash_jpy: number } | undefined;
   return row?.cash_jpy ?? 0;
 }
 
-function setCash(value: number): void {
-  getDb().prepare("UPDATE account SET cash_jpy = ? WHERE id = 1").run(value);
+function setCash(market: Market, value: number): void {
+  getDb()
+    .prepare(
+      "INSERT INTO accounts (market, cash_jpy) VALUES (?, ?) ON CONFLICT(market) DO UPDATE SET cash_jpy = excluded.cash_jpy",
+    )
+    .run(market, value);
 }
 
-export function getHoldings(): PortfolioHolding[] {
+export function getHoldings(market: Market): PortfolioHolding[] {
   const rows = getDb()
     .prepare(
-      "SELECT ticker, shares, avg_cost_jpy AS avgCostJpy, market FROM portfolio WHERE shares > 0 ORDER BY ticker",
+      "SELECT ticker, shares, avg_cost_jpy AS avgCostJpy, market FROM portfolio WHERE shares > 0 AND market = ? ORDER BY ticker",
     )
-    .all() as PortfolioHolding[];
+    .all(market) as PortfolioHolding[];
   return rows;
 }
 
@@ -101,10 +110,11 @@ export async function executeBuy(
     ? {
         price: priceOverride.price,
         priceJpy: priceOverride.priceJpy,
-        market: priceOverride.market ?? detectMarket(ticker),
+        market: (priceOverride.market as Market) ?? detectMarket(ticker),
       }
     : await getQuote(ticker);
-  const cash = getCash();
+  const market = quote.market as Market;
+  const cash = getCash(market);
 
   // AIは株価を無視した株数を出しがちなので、却下せず「上限・現金・現金下限に
   // 収まる最大株数」までクランプする（バックテストの検証で全却下→0取引の不具合を確認）。
@@ -153,8 +163,9 @@ export async function executeBuy(
     ).run(ticker, shares, quote.priceJpy, quote.market);
   }
 
-  setCash(cash - outflow);
+  setCash(market, cash - outflow);
   recordTransaction({
+    market,
     ticker,
     action: "BUY",
     shares,
@@ -202,6 +213,7 @@ export async function executeSell(
     };
   }
 
+  const market = (priceOverride?.market as Market) ?? detectMarket(ticker);
   const quote = priceOverride
     ? { price: priceOverride.price, priceJpy: priceOverride.priceJpy }
     : await getQuote(ticker);
@@ -221,8 +233,9 @@ export async function executeSell(
     db.prepare("DELETE FROM portfolio WHERE ticker = ?").run(ticker);
   }
 
-  setCash(getCash() + proceeds);
+  setCash(market, getCash(market) + proceeds);
   recordTransaction({
+    market,
     ticker,
     action: "SELL",
     shares,
@@ -246,6 +259,7 @@ export async function executeSell(
 }
 
 function recordTransaction(t: {
+  market: Market;
   ticker: string;
   action: TradeAction;
   shares: number;
@@ -260,10 +274,11 @@ function recordTransaction(t: {
   getDb()
     .prepare(
       `INSERT INTO transactions
-        (ticker, action, shares, price, price_jpy, total_jpy, fee_jpy, realized_pnl_jpy, source, ai_reasoning)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (market, ticker, action, shares, price, price_jpy, total_jpy, fee_jpy, realized_pnl_jpy, source, ai_reasoning)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
+      t.market,
       t.ticker,
       t.action,
       t.shares,
@@ -280,10 +295,10 @@ function recordTransaction(t: {
 /* ---------- 評価・サマリ ---------- */
 
 /** ポートフォリオを時価評価し、損益込みのサマリを返す。 */
-export async function getPortfolioSummary(): Promise<PortfolioSummary> {
-  const cashJpy = getCash();
-  const holdings = getHoldings();
-  const initialCash = Number(getSetting("initial_cash") ?? "1000000");
+export async function getPortfolioSummary(market: Market): Promise<PortfolioSummary> {
+  const cashJpy = getCash(market);
+  const holdings = getHoldings(market);
+  const initialCash = Number(getSetting(initialCashKey(market)) ?? "1000000");
 
   let valuations: HoldingValuation[] = [];
   if (holdings.length > 0) {
@@ -328,27 +343,30 @@ export async function getPortfolioSummary(): Promise<PortfolioSummary> {
   };
 }
 
-/** 現在の総資産を equity_snapshots に記録する（ベンチマーク評価額は任意）。 */
+/** 現在の総資産を equity_snapshots に記録する（市場別・ベンチマーク評価額は任意）。 */
 export function recordEquitySnapshot(
+  market: Market,
   totalValueJpy: number,
   cashJpy: number,
   benchmarkValueJpy?: number | null,
 ) {
   getDb()
     .prepare(
-      "INSERT INTO equity_snapshots (total_value_jpy, cash_jpy, benchmark_value_jpy) VALUES (?, ?, ?)",
+      "INSERT INTO equity_snapshots (market, total_value_jpy, cash_jpy, benchmark_value_jpy) VALUES (?, ?, ?, ?)",
     )
-    .run(totalValueJpy, cashJpy, benchmarkValueJpy ?? null);
+    .run(market, totalValueJpy, cashJpy, benchmarkValueJpy ?? null);
 }
 
-/** 資金をリセットして全保有・履歴を消去する。 */
-export function resetAccount(initialCash: number) {
+/** 指定市場の資金をリセットして、その市場の保有・履歴を消去する。 */
+export function resetAccount(market: Market, initialCash: number) {
   const db = getDb();
-  db.exec("DELETE FROM portfolio; DELETE FROM transactions; DELETE FROM equity_snapshots;");
-  db.prepare("UPDATE account SET cash_jpy = ? WHERE id = 1").run(initialCash);
+  db.prepare("DELETE FROM portfolio WHERE market = ?").run(market);
+  db.prepare("DELETE FROM transactions WHERE market = ?").run(market);
+  db.prepare("DELETE FROM equity_snapshots WHERE market = ?").run(market);
+  setCash(market, initialCash);
   db.prepare(
-    "INSERT INTO settings (key, value) VALUES ('initial_cash', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-  ).run(String(initialCash));
+    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  ).run(initialCashKey(market), String(initialCash));
 }
 
 export { detectMarket };

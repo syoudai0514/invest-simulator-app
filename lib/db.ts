@@ -32,6 +32,12 @@ function migrate(db: DatabaseSync) {
       cash_jpy REAL NOT NULL
     );
 
+    -- 市場別口座（US/JP をそれぞれ独立の仮想資金で運用）
+    CREATE TABLE IF NOT EXISTS accounts (
+      market   TEXT PRIMARY KEY,   -- US | JP
+      cash_jpy REAL NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS portfolio (
       ticker        TEXT PRIMARY KEY,
       shares        REAL NOT NULL,
@@ -111,7 +117,11 @@ function migrate(db: DatabaseSync) {
   // 既存DBへの後付けマイグレーション（列が無ければ追加）
   addColumnIfMissing(db, "transactions", "fee_jpy", "REAL NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "transactions", "realized_pnl_jpy", "REAL");
+  addColumnIfMissing(db, "transactions", "market", "TEXT NOT NULL DEFAULT 'US'");
   addColumnIfMissing(db, "equity_snapshots", "benchmark_value_jpy", "REAL");
+  addColumnIfMissing(db, "equity_snapshots", "market", "TEXT NOT NULL DEFAULT 'US'");
+  addColumnIfMissing(db, "cycle_log", "market", "TEXT NOT NULL DEFAULT 'US'");
+  addColumnIfMissing(db, "decision_log", "market", "TEXT NOT NULL DEFAULT 'US'");
 }
 
 /** テーブルに指定列が無ければ ALTER TABLE で追加する。 */
@@ -139,10 +149,17 @@ function seed(db: DatabaseSync) {
     );
   }
 
+  // 市場別口座（US/JP）を各初期資金で用意（無ければ）
+  const upsertAcc = db.prepare(
+    "INSERT INTO accounts (market, cash_jpy) VALUES (?, ?) ON CONFLICT(market) DO NOTHING",
+  );
+  upsertAcc.run("US", DEFAULT_INITIAL_CASH);
+  upsertAcc.run("JP", DEFAULT_INITIAL_CASH);
+
   // 既定の設定値
   const defaults: Record<string, string> = {
-    auto_enabled: "false",
-    interval_minutes: "60",
+    auto_enabled: "true",
+    interval_minutes: "5",
     initial_cash: String(DEFAULT_INITIAL_CASH),
   };
   const upsert = db.prepare(
@@ -185,6 +202,7 @@ export function setSetting(key: string, value: string): void {
 /* ---------- フィードバック用ログ ---------- */
 
 export interface DecisionLogRow {
+  market: string;
   ticker: string;
   action: "BUY" | "SELL" | "HOLD";
   shares: number;
@@ -204,11 +222,11 @@ export function logDecision(d: DecisionLogRow): void {
   getDb()
     .prepare(
       `INSERT INTO decision_log
-        (ticker, action, shares, executed, reject_reason, reasoning, price_jpy, rsi14, sma20, sma50, mom_pct, day_ret, pnl_pct)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (market, ticker, action, shares, executed, reject_reason, reasoning, price_jpy, rsi14, sma20, sma50, mom_pct, day_ret, pnl_pct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
-      d.ticker, d.action, d.shares, d.executed ? 1 : 0,
+      d.market, d.ticker, d.action, d.shares, d.executed ? 1 : 0,
       d.rejectReason ?? null, d.reasoning ?? null, d.priceJpy ?? null,
       d.rsi14 ?? null, d.sma20 ?? null, d.sma50 ?? null,
       d.momPct ?? null, d.dayRet ?? null, d.pnlPct ?? null,
@@ -216,6 +234,7 @@ export function logDecision(d: DecisionLogRow): void {
 }
 
 export function logCycle(c: {
+  market: string;
   engine: string;
   riskOff: boolean;
   marketOpen: boolean;
@@ -229,11 +248,11 @@ export function logCycle(c: {
   getDb()
     .prepare(
       `INSERT INTO cycle_log
-        (engine, risk_off, market_open, screened, decisions, executed, total_value_jpy, cash_jpy, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (market, engine, risk_off, market_open, screened, decisions, executed, total_value_jpy, cash_jpy, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
-      c.engine, c.riskOff ? 1 : 0, c.marketOpen ? 1 : 0,
+      c.market, c.engine, c.riskOff ? 1 : 0, c.marketOpen ? 1 : 0,
       JSON.stringify(c.screened), c.decisions, c.executed,
       c.totalValueJpy, c.cashJpy, c.note ?? null,
     );
