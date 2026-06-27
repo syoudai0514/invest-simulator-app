@@ -31,6 +31,8 @@ export interface Candidate {
   newsTitles: string[];
   dayRet?: number; // 前日の単日リターン(%)。キャピチュレーション(投げ売り)判定に使う
   volRatio?: number; // 前日出来高 / 20日平均出来高。急落の本気度の確認に使う
+  newsSentiment?: number; // 事前計算済みのニュースセンチメント(-1..+1)。あれば classifyNews より優先
+  newsReason?: string; // ニュース判定の根拠（ダッシュボード表示用）
 }
 
 export interface RuleParams {
@@ -167,7 +169,7 @@ export function ruleDecide(
   // 1) 保有銘柄の手仕舞い判断
   for (const c of candidates) {
     if (c.heldShares <= 0) continue;
-    const sent = classifyNews(c.newsTitles);
+    const sent = c.newsSentiment ?? classifyNews(c.newsTitles);
     const reasons: string[] = [];
     if (c.rsi14 !== null && c.rsi14 >= p.rsiSell)
       reasons.push(`RSI${c.rsi14.toFixed(0)}で買われすぎ`);
@@ -202,7 +204,7 @@ export function ruleDecide(
     if (ctx.inCooldown?.(c.ticker)) continue; // 損切り直後の再エントリー禁止
     if (isDowntrend(c)) continue; // 下降トレンドは新規回避
     if (c.momPct > p.momCeiling) continue; // 過熱(パラボリック)は新規回避
-    const sent = classifyNews(c.newsTitles);
+    const sent = c.newsSentiment ?? classifyNews(c.newsTitles);
     if (sent <= p.newsVetoNeg) continue; // 悪材料は見送り
     let score = 0;
     const why: string[] = [];

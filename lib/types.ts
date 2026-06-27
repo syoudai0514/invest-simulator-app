@@ -55,6 +55,41 @@ export interface PortfolioResponse {
   newsStatus: NewsStatus;
 }
 
+export interface ActivityDecision {
+  ranAt: string;
+  ticker: string;
+  action: "BUY" | "SELL" | "HOLD";
+  shares: number;
+  executed: number;
+  rejectReason: string | null;
+  reasoning: string | null;
+  rsi14: number | null;
+  momPct: number | null;
+  pnlPct: number | null;
+}
+
+export interface ActivityTrade {
+  createdAt: string;
+  action: "BUY" | "SELL";
+  ticker: string;
+  shares: number;
+  priceJpy: number;
+  realizedPnlJpy: number | null;
+  reasoning: string | null;
+}
+
+export interface MarketActivity {
+  regime: { riskOff: boolean; ranAt: string } | null;
+  lastCycle: { ranAt: string; marketOpen: boolean; decisions: number; executed: number; note: string | null } | null;
+  decisions: ActivityDecision[];
+  trades: ActivityTrade[];
+}
+
+export interface ActivityResponse {
+  US: MarketActivity;
+  JP: MarketActivity;
+}
+
 export interface Transaction {
   id: number;
   ticker: string;

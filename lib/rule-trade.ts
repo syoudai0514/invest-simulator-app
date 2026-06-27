@@ -22,6 +22,7 @@ import {
   type TradeResult,
 } from "./trading";
 import { getNewsForTickers } from "./news";
+import { llmNewsSentiment } from "./news-llm";
 import { getMarketStatus } from "./market";
 import { getSetting, setSetting, logDecision, logCycle } from "./db";
 
@@ -187,6 +188,21 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
         ctxByTicker.set(t, { rsi14, sma20, sma50, momPct, dayRet, priceJpy: q.priceJpy });
       }
 
+      // ニュースの読解はLLM(GROQ)に任せる。中核の指標・レジーム・執行はコードのまま。
+      // 失敗時はキーワード方式（classifyNews）に自動フォールバック（newsSentiment未設定のまま）。
+      try {
+        const verdicts = await llmNewsSentiment(
+          candidates.map((c) => ({ ticker: c.ticker, titles: c.newsTitles })),
+        );
+        for (const c of candidates) {
+          const v = verdicts[c.ticker];
+          if (v) { c.newsSentiment = v.score; c.newsReason = v.reason; }
+        }
+      } catch (e) {
+        console.warn(`[rule-trade:${market}] ニュースLLM失敗→キーワード方式に切替: ${(e as Error).message}`);
+      }
+
+      const newsReasonBy = new Map(candidates.map((c) => [c.ticker, c.newsReason]));
       const decisions = ruleDecide(candidates, {
         cash, minCash: limits.minCashJpy, params: TUNED_PARAMS,
         inCooldown: makeInCooldown(market, cfg.tz),
@@ -195,22 +211,24 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
         if (d.action !== "BUY" || d.shares <= 0) continue;
         decisionCount++;
         const ctx = ctxByTicker.get(d.ticker);
+        const nr = newsReasonBy.get(d.ticker);
+        const reasoning = nr && nr !== "ニュースなし" ? `${d.reasoning}／ニュース: ${nr}` : d.reasoning;
         if (riskOff) {
           logDecision({
             market, ticker: d.ticker, action: "BUY", shares: d.shares, executed: false,
-            rejectReason: `リスクオフ(${cfg.bench}<SMA20)`, reasoning: d.reasoning,
+            rejectReason: `リスクオフ(${cfg.bench}<SMA20)`, reasoning,
             priceJpy: ctx?.priceJpy, rsi14: ctx?.rsi14, sma20: ctx?.sma20, sma50: ctx?.sma50, momPct: ctx?.momPct, dayRet: ctx?.dayRet,
           });
           continue;
         }
-        const r = await executeBuy(d.ticker, d.shares, "AI", d.reasoning, limits).catch(
+        const r = await executeBuy(d.ticker, d.shares, "AI", reasoning, limits).catch(
           (e) => ({ ok: false, message: (e as Error).message }) as TradeResult,
         );
         if (r.ok) executedCount++;
         trades.push(r);
         logDecision({
           market, ticker: d.ticker, action: "BUY", shares: d.shares, executed: r.ok,
-          rejectReason: r.ok ? null : r.message, reasoning: d.reasoning,
+          rejectReason: r.ok ? null : r.message, reasoning,
           priceJpy: ctx?.priceJpy, rsi14: ctx?.rsi14, sma20: ctx?.sma20, sma50: ctx?.sma50, momPct: ctx?.momPct, dayRet: ctx?.dayRet,
         });
       }
