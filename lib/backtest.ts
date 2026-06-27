@@ -109,7 +109,11 @@ export interface BacktestConfig {
   params?: RuleParams; // rule戦略のチューニングパラメータ
 }
 
-const TRADE_COST_RATE = 0.0015;
+// 片道コスト（手数料＋スプレッド）。BT_COST で上書き可。
+const TRADE_COST_RATE = process.env.BT_COST ? Number(process.env.BT_COST) : 0.0015;
+// スリッページ（約定価格の不利方向へのズレ率）。荒い銘柄は寄りで滑るため保守的に見込む。
+// BUYは price×(1+slip)、SELLは price×(1−slip) で約定。0で無効。
+const SLIPPAGE_PCT = process.env.BT_SLIP ? Number(process.env.BT_SLIP) : 0;
 // バックテストはトークン消費が大きいため、BT_MODEL で軽量モデルに切替可能。
 const MODEL =
   process.env.BT_MODEL || process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -127,6 +131,10 @@ const TRAIL_PCT = process.env.BT_TRAIL ? Number(process.env.BT_TRAIL) : 0;
 // 最も頑健な改善だったため既定でON（BT_REGIME=0 で無効化可）。
 const REGIME_ON = process.env.BT_REGIME !== "0";
 const REGIME_SMA = Number(process.env.BT_REGIME_SMA) || 20;
+// 長期トレンドフィルタ: ベンチが自身のSMA(LTREND)を下回る＝長期下落局面では新規BUY全停止。
+// Meb Faber等が確立した「指数が200日線の下では買わない」普遍ルール（外部由来＝過剰最適化でない）。
+// 0で無効。BT_LTREND=200 で有効化。
+const LTREND_SMA = process.env.BT_LTREND ? Number(process.env.BT_LTREND) : 0;
 // 「好材料急騰で売り→押し目で買い戻し」オーバーレイ。BT_SURGE_EXIT=0 で無効。
 // 保有株が前日に +SURGE_EXIT% 急騰したら翌寄りで売り、売値から REBUY_DROP% 下げたら
 // REBUY_DAYS 営業日以内に買い戻す（来なければ見送り）。
@@ -301,7 +309,9 @@ export async function runBacktest(
   const topN = config.topN ?? 12;
   const start = new Date(config.startDate + "T00:00:00Z");
   const end = new Date(config.endDate + "T23:59:59Z");
-  const fetchFrom = new Date(start.getTime() - 90 * 24 * 60 * 60 * 1000);
+  // 長期フィルタ(SMA200等)を使う場合は、初日からSMAを引けるよう履歴を多めに取得。
+  const lookbackDays = Math.max(90, LTREND_SMA > 0 ? Math.ceil(LTREND_SMA * 1.6) + 40 : 90);
+  const fetchFrom = new Date(start.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
   const fetchTo = new Date(end.getTime() + 2 * 24 * 60 * 60 * 1000);
 
   const allTickers = [...new Set([...config.tickers, config.benchmarkTicker])];
@@ -345,13 +355,19 @@ export async function runBacktest(
     const todayBar = (t: string): DailyBar | null =>
       (barsByTicker.get(t) ?? []).find((b) => isoDate(b.date) === day) ?? null;
 
-    // マーケット・レジーム判定（前日までのベンチがSMAを下回る＝リスクオフ）
+    // マーケット・レジーム判定: ベンチが短期SMA(20)または長期SMA(200, 任意)を下回ればリスクオフ
     let riskOff = false;
-    if (REGIME_ON) {
+    if (REGIME_ON || LTREND_SMA > 0) {
       const benchPast = benchBars.filter((b) => b.date < dayDate).map((b) => b.close);
-      const benchSma = sma(benchPast, REGIME_SMA);
       const benchPrev = benchPast[benchPast.length - 1];
-      riskOff = benchSma != null && benchPrev != null && benchPrev < benchSma;
+      if (REGIME_ON) {
+        const sma20 = sma(benchPast, REGIME_SMA);
+        if (sma20 != null && benchPrev != null && benchPrev < sma20) riskOff = true;
+      }
+      if (LTREND_SMA > 0) {
+        const smaLt = sma(benchPast, LTREND_SMA);
+        if (smaLt != null && benchPrev != null && benchPrev < smaLt) riskOff = true;
+      }
     }
 
     // 1) リスク管理（損切り/利確/トレーリング）: 当日始値で評価・約定
@@ -669,6 +685,7 @@ export async function runBacktest(
     reasoning: string,
     limits: { maxPositionJpy: number; minCashJpy: number },
   ): { ok: boolean; reason?: string; clampedFrom?: number } {
+    price = price * (1 + SLIPPAGE_PCT); // スリッページ: 買いは不利（高い）方向に滑る
     // AIは株価を無視した固定株数を出しがちなので、ここで上限・現金・現金下限に
     // 収まる最大株数までクランプする（従来は超過＝全却下で一度も約定しなかった）。
     const unit = price * (1 + TRADE_COST_RATE); // 1株あたりの実質流出額
@@ -722,6 +739,7 @@ export async function runBacktest(
     const pos = positions.get(ticker);
     if (!pos || pos.shares < shares)
       return { ok: false, reason: "保有不足" };
+    price = price * (1 - SLIPPAGE_PCT); // スリッページ: 売りは不利（安い）方向に滑る
     const fee = price * shares * TRADE_COST_RATE;
     const proceeds = price * shares - fee;
     const realizedPnl = (price - pos.avgCost) * shares - fee;

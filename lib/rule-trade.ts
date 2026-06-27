@@ -10,6 +10,7 @@
  *   - 1営業日に1度: スクリーニング→ruleDecideで新規BUY。リスクオフ(指数<SMA20)時は停止。
  */
 import { getQuotes, getChart, type Quote, type Market } from "./yahoo";
+import yahooFinance from "./yf";
 import { runScreener, getScreenedTickers } from "./screener";
 import { summarize, sma } from "./indicators";
 import { ruleDecide, TUNED_PARAMS, type Candidate } from "./strategy";
@@ -60,12 +61,27 @@ function dayKey(tz: string, d: Date = new Date()): string {
   }).format(d);
 }
 
+/**
+ * リスクオフ判定: ベンチ(指数)が短期SMA(20)または長期SMA(200)を下回る局面か。
+ * - SMA20: 短期の下落で新規買いを一時停止（ヒゲ回避）
+ * - SMA200: 長期下落（弱気相場）では新規買いを全停止（Meb Faber等の確立ルール）
+ * SMA200算出のため日足を約400日分取得する。取得失敗時は false（通常運用）。
+ */
 async function isRiskOff(bench: string): Promise<boolean> {
   try {
-    const closes = (await getChart(bench, "3mo")).map((c) => c.close);
-    const s = sma(closes, REGIME_SMA);
+    const to = new Date();
+    const from = new Date(to.getTime() - 400 * 24 * 60 * 60 * 1000);
+    const c = (await yahooFinance.chart(bench, { period1: from, period2: to, interval: "1d" })) as {
+      quotes?: { close: number | null }[];
+    };
+    const closes = (c.quotes ?? []).filter((q) => q.close != null).map((q) => q.close as number);
+    if (closes.length < REGIME_SMA + 1) return false;
     const last = closes[closes.length - 1];
-    return s != null && last < s;
+    const s20 = sma(closes, REGIME_SMA);
+    const s200 = sma(closes, 200);
+    if (s20 != null && last < s20) return true; // 短期下落
+    if (s200 != null && last < s200) return true; // 長期下落（弱気相場）
+    return false;
   } catch {
     return false;
   }

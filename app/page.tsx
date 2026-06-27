@@ -267,7 +267,7 @@ function CriteriaCard() {
           <p className="font-medium text-emerald-600">買う条件</p>
           <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
             <li>上昇トレンド（価格 &gt; 20日線 &gt; 50日線）でRSIが過熱でない</li>
-            <li>地合いが「リスクオン」（指数が20日線の上）のときだけ新規買い</li>
+            <li>地合いが「リスクオン」（指数が20日線かつ200日線の上）のときだけ新規買い</li>
             <li>好材料ニュースがあれば優先度アップ（LLMが読解）</li>
             <li>1銘柄は資産の20%まで・現金10%は常に残す・1日最大3銘柄</li>
           </ul>
