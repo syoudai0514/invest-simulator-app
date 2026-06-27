@@ -43,6 +43,7 @@ export interface RuleParams {
   minScore: number; // BUY実行に必要な最低スコア
   minPrice: number; // この株価未満の銘柄は対象外（ペニー株除外）
   momFloorOversold: number; // 20日モメンタムがこれ未満なら「売られすぎ反発」買いを見送る（落ちるナイフ回避）
+  momCeiling: number; // 20日モメンタムがこれを超える過熱(パラボリック)は新規BUY見送り
 }
 
 /** 既定パラメータ（元プロンプトのルールを素直に数値化した初期値）。 */
@@ -58,6 +59,7 @@ export const DEFAULT_PARAMS: RuleParams = {
   minScore: 0.3,
   minPrice: 0,
   momFloorOversold: -100,
+  momCeiling: 100000,
 };
 
 /** チューニング後の推奨パラメータ（落ちるナイフ・ペニー株を抑制）。 */
@@ -73,6 +75,7 @@ export const TUNED_PARAMS: RuleParams = {
   minScore: 0.5,
   minPrice: 10,
   momFloorOversold: -12,
+  momCeiling: 80,
 };
 
 const POS_WORDS = [
@@ -178,6 +181,7 @@ export function ruleDecide(
     if (c.lastClose < p.minPrice) continue; // ペニー株除外
     if (ctx.inCooldown?.(c.ticker)) continue; // 損切り直後の再エントリー禁止
     if (isDowntrend(c)) continue; // 下降トレンドは新規回避
+    if (c.momPct > p.momCeiling) continue; // 過熱(パラボリック)は新規回避
     const sent = classifyNews(c.newsTitles);
     if (sent <= p.newsVetoNeg) continue; // 悪材料は見送り
     let score = 0;

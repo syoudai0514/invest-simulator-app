@@ -115,10 +115,12 @@ const MODEL =
   process.env.BT_MODEL || process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 // ニュースの鮮度窓（判断日からこの日数より古い見出しは使わない）。
 const NEWS_FRESH_DAYS = 7;
-const MAX_POSITION_PCT = 0.2;
-const MIN_CASH_PCT = 0.1;
-const STOP_LOSS_PCT = -8;
-const TAKE_PROFIT_PCT = 15;
+const MAX_POSITION_PCT = Number(process.env.BT_MAXPOS_PCT) || 0.2;
+const MIN_CASH_PCT = process.env.BT_MINCASH_PCT ? Number(process.env.BT_MINCASH_PCT) : 0.1;
+const STOP_LOSS_PCT = process.env.BT_STOP ? Number(process.env.BT_STOP) : -8;
+const TAKE_PROFIT_PCT = process.env.BT_TP ? Number(process.env.BT_TP) : 15;
+// トレーリングストップ（ピークからこの%下落で手仕舞い）。0なら無効。
+const TRAIL_PCT = process.env.BT_TRAIL ? Number(process.env.BT_TRAIL) : 0;
 
 interface AiDecision {
   ticker: string;
@@ -320,6 +322,7 @@ export async function runBacktest(
   let newsHitDays = 0; // ニュースが1件以上付いた銘柄日数（カバレッジ確認用）
   const stoppedAtIdx = new Map<string, number>(); // 損切りした銘柄→その営業日インデックス
   const COOLDOWN_DAYS = 5; // 損切り後、再エントリーを禁止する営業日数
+  const peakByTicker = new Map<string, number>(); // 保有中の最高値（トレーリング用）
   let dayIdx = -1;
 
   for (const day of tradingDays) {
@@ -328,13 +331,18 @@ export async function runBacktest(
     const todayBar = (t: string): DailyBar | null =>
       (barsByTicker.get(t) ?? []).find((b) => isoDate(b.date) === day) ?? null;
 
-    // 1) リスク管理（損切り/利確）: 当日始値で評価・約定
+    // 1) リスク管理（損切り/利確/トレーリング）: 当日始値で評価・約定
     for (const [ticker, pos] of [...positions.entries()]) {
       const bar = todayBar(ticker);
       if (!bar) continue;
+      const peak = Math.max(peakByTicker.get(ticker) ?? pos.avgCost, bar.open);
+      peakByTicker.set(ticker, peak);
       const pnlPct = ((bar.open - pos.avgCost) / pos.avgCost) * 100;
+      const fromPeakPct = ((bar.open - peak) / peak) * 100;
       let reason = "";
       if (pnlPct <= STOP_LOSS_PCT) reason = `自動損切り(${pnlPct.toFixed(1)}%)`;
+      else if (TRAIL_PCT > 0 && pnlPct > 0 && fromPeakPct <= -TRAIL_PCT)
+        reason = `トレーリング手仕舞い(ピーク比${fromPeakPct.toFixed(1)}%)`;
       else if (pnlPct >= TAKE_PROFIT_PCT) reason = `自動利確(${pnlPct.toFixed(1)}%)`;
       if (reason) {
         const r = sell(ticker, pos.shares, bar.open, day, reason);
@@ -619,7 +627,10 @@ export async function runBacktest(
     const realizedPnl = (price - pos.avgCost) * shares - fee;
     cash += proceeds;
     pos.shares -= shares;
-    if (pos.shares <= 0) positions.delete(ticker);
+    if (pos.shares <= 0) {
+      positions.delete(ticker);
+      peakByTicker.delete(ticker);
+    }
     trades.push({
       date: day,
       ticker,

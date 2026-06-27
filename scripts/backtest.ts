@@ -11,7 +11,16 @@ import { UNIVERSE_TICKERS } from "../lib/universe";
 import { JP_TICKERS } from "../lib/universe-jp";
 import { DEFAULT_PARAMS, TUNED_PARAMS } from "../lib/strategy";
 
-const params = process.env.BT_PARAMS === "default" ? DEFAULT_PARAMS : TUNED_PARAMS;
+const baseParams = process.env.BT_PARAMS === "default" ? DEFAULT_PARAMS : TUNED_PARAMS;
+// 個別パラメータの env オーバーライド（チューニング用）
+const params = {
+  ...baseParams,
+  ...(process.env.BT_MAXNEW ? { maxNewPositions: Number(process.env.BT_MAXNEW) } : {}),
+  ...(process.env.BT_ALLOC ? { allocPctPerBuy: Number(process.env.BT_ALLOC) } : {}),
+  ...(process.env.BT_MINSCORE ? { minScore: Number(process.env.BT_MINSCORE) } : {}),
+  ...(process.env.BT_MOMCEIL ? { momCeiling: Number(process.env.BT_MOMCEIL) } : {}),
+  ...(process.env.BT_RSISELL ? { rsiSell: Number(process.env.BT_RSISELL) } : {}),
+};
 
 const market = (process.argv[2] ?? "US") as "US" | "JP";
 const startDate = process.argv[3] ?? "2026-06-23";
@@ -45,7 +54,7 @@ function buildConfig(): BacktestConfig {
     startDate,
     endDate,
     initialCash: 10_000,
-    topN: 12,
+    topN: Number(process.env.BT_TOPN) || 12,
     useNews: process.env.BT_NEWS !== "0",
     strategy,
     params,
