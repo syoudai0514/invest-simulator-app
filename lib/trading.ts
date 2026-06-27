@@ -13,6 +13,16 @@ export interface TradeLimits {
   minCashJpy?: number;
 }
 
+/**
+ * 約定価格の明示指定。過去日シミュレーションで getQuote（現在値）の代わりに
+ * その日の始値などを使うために用いる。省略時は従来どおり現在値で約定する。
+ */
+export interface PriceOverride {
+  price: number; // 現地通貨建ての約定単価
+  priceJpy: number; // 円換算した約定単価
+  market?: string; // 市場（省略時はティッカーから推定）
+}
+
 export interface PortfolioHolding {
   ticker: string;
   shares: number;
@@ -81,12 +91,19 @@ export async function executeBuy(
   source: TradeSource,
   reasoning?: string,
   limits?: TradeLimits,
+  priceOverride?: PriceOverride,
 ): Promise<TradeResult> {
   const ticker = rawTicker.trim().toUpperCase();
   if (!Number.isFinite(shares) || shares <= 0) {
     return { ok: false, message: "数量が不正です" };
   }
-  const quote = await getQuote(ticker);
+  const quote = priceOverride
+    ? {
+        price: priceOverride.price,
+        priceJpy: priceOverride.priceJpy,
+        market: priceOverride.market ?? detectMarket(ticker),
+      }
+    : await getQuote(ticker);
   const cash = getCash();
 
   // AIは株価を無視した株数を出しがちなので、却下せず「上限・現金・現金下限に
@@ -168,6 +185,7 @@ export async function executeSell(
   shares: number,
   source: TradeSource,
   reasoning?: string,
+  priceOverride?: PriceOverride,
 ): Promise<TradeResult> {
   const ticker = rawTicker.trim().toUpperCase();
   if (!Number.isFinite(shares) || shares <= 0) {
@@ -184,7 +202,9 @@ export async function executeSell(
     };
   }
 
-  const quote = await getQuote(ticker);
+  const quote = priceOverride
+    ? { price: priceOverride.price, priceJpy: priceOverride.priceJpy }
+    : await getQuote(ticker);
   const totalJpy = quote.priceJpy * shares;
   const feeJpy = totalJpy * TRADE_COST_RATE;
   const proceeds = totalJpy - feeJpy; // 手数料控除後の受取額
