@@ -31,6 +31,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [autoEnabled, setAutoEnabled] = useState(false);
   const [intervalMin, setIntervalMin] = useState(5);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -44,6 +45,7 @@ export default function Dashboard() {
       setAct(a.error ? null : a);
       setAutoEnabled(s.autoEnabled);
       setIntervalMin(s.intervalMinutes);
+      setUpdatedAt(new Date());
     } catch (e) {
       toast.error(`読み込み失敗: ${(e as Error).message}`);
     } finally {
@@ -51,8 +53,13 @@ export default function Dashboard() {
     }
   }, []);
 
+  // 初回ロード＋30秒ごとに自動更新（タブが非表示の間はスキップ）
   useEffect(() => {
     load();
+    const id = setInterval(() => {
+      if (typeof document === "undefined" || !document.hidden) load();
+    }, 30000);
+    return () => clearInterval(id);
   }, [load]);
 
   async function toggleAuto(v: boolean) {
@@ -86,6 +93,9 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <span className="text-xs text-muted-foreground">
+            30秒ごと自動更新{updatedAt ? `・最終 ${updatedAt.toLocaleTimeString("ja-JP")}` : ""}
+          </span>
           <Button variant="outline" size="sm" onClick={load}>
             <RefreshCw className="h-4 w-4" /> 更新
           </Button>
