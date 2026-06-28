@@ -18,10 +18,12 @@ interface Bar { date: string; open: number; close: number; volume: number }
 async function load(): Promise<Bar[]> {
   const to = new Date();
   const from = new Date(to.getTime() - 730 * 24 * 60 * 60 * 1000);
-  const c = await yahooFinance.chart(ticker, { period1: from, period2: to, interval: "1d" });
+  const c = (await yahooFinance.chart(ticker, { period1: from, period2: to, interval: "1d" })) as {
+    quotes?: { date: Date; open: number | null; close: number | null; volume: number | null }[];
+  };
   return (c.quotes ?? [])
-    .filter((q: any) => q.open != null && q.close != null && q.volume != null)
-    .map((q: any) => ({ date: new Date(q.date).toISOString().slice(0, 10), open: q.open, close: q.close, volume: q.volume }));
+    .filter((q) => q.open != null && q.close != null && q.volume != null)
+    .map((q) => ({ date: new Date(q.date).toISOString().slice(0, 10), open: q.open as number, close: q.close as number, volume: q.volume as number }));
 }
 
 async function main() {

@@ -32,8 +32,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # 本番は決定論ルールエンジン（lib/rule-trade）で動作。GROQ等のLLMキーは不要。
+      # 売買判断の中核はルールエンジン（lib/rule-trade）で0トークン。
+      # ニュースの読解だけ GROQ(LLM) を使う（1日1回・市場ごと）。キーが無い場合は
+      # 自動でキーワード方式にフォールバックするため、未設定でも売買は止まらない。
       - name: Run trade cycle
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: llama-3.3-70b-versatile
         run: npm run trade
 
       - name: Commit updated database

@@ -50,6 +50,7 @@ export default function Dashboard() {
 
   // 初回ロード＋30秒ごとに自動更新（タブが非表示の間はスキップ）
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- マウント時のデータ取得（標準パターン）
     load();
     const id = setInterval(() => {
       if (typeof document === "undefined" || !document.hidden) load();

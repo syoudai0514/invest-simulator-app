@@ -3,6 +3,7 @@
 import {
   Area,
   AreaChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -63,6 +64,13 @@ export function EquityChart({
             borderRadius: 8,
             fontSize: 12,
           }}
+        />
+        <ReferenceLine
+          y={initialCash}
+          stroke="currentColor"
+          strokeDasharray="4 4"
+          className="text-muted-foreground/50"
+          label={{ value: "初期", fontSize: 10, position: "insideTopLeft" }}
         />
         <Area
           type="monotone"

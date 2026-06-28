@@ -36,6 +36,7 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- マウント時のデータ取得（標準パターン）
     load();
   }, [load]);
 

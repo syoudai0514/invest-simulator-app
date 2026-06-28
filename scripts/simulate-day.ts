@@ -164,7 +164,7 @@ async function build(targetDay: string) {
   const screened = scored.slice(0, TOP_N).map((s) => s.ticker);
 
   // ニュース（取得できた分のみ・対象日より前かつ7日以内）
-  let newsByTicker: Record<string, { title: string; publishedAt: string }[]> = {};
+  const newsByTicker: Record<string, { title: string; publishedAt: string }[]> = {};
   try {
     const raw = await getNewsForTickers(screened, true);
     const cutoffOld = new Date(dayDate.getTime() - NEWS_FRESH_DAYS * 24 * 60 * 60 * 1000);
@@ -381,7 +381,6 @@ async function batch(n: number, seed: number, market: "US" | "JP" = "US", useNew
 
   const rows: { day: string; pnlPct: number; trades: number; investedPct: number; spyPct: number }[] = [];
   for (const day of chosen) {
-    const dayDate = new Date(day + "T00:00:00Z");
     // スクリーニング＋候補生成（フロス除外は MIN_PRICE / MIN_DOLLAR_VOLUME）
     const scored: { ticker: string; score: number }[] = [];
     for (const t of tickers) {
