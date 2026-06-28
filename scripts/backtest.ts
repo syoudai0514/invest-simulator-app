@@ -6,6 +6,7 @@
  * BT_LIMIT で対象銘柄数を調整可。
  */
 import { writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { runBacktest, type BacktestConfig, type BacktestResult } from "../lib/backtest";
 import { UNIVERSE_TICKERS } from "../lib/universe";
 import { JP_TICKERS } from "../lib/universe-jp";
@@ -110,7 +111,8 @@ function printResult(r: BacktestResult) {
   console.log("--- 評価指標 ---");
   const m = r.metrics;
   console.log(`確定売買: ${m.realizedTrades}回 / 勝率: ${m.winRate === null ? "—" : m.winRate.toFixed(0) + "%"} (${m.wins}勝${m.losses}敗)`);
-  console.log(`確定損益: ${n(m.realizedPnl)} / 取引コスト累計: ${n(m.totalFee)} / 最大DD: ${m.maxDrawdownPct === null ? "—" : m.maxDrawdownPct.toFixed(2) + "%"}`);
+  console.log(`確定損益: ${n(m.realizedPnl)} / 取引コスト累計: ${n(m.totalFee)}`);
+  console.log(`最大DD: 始値ベース ${m.maxDrawdownPct === null ? "—" : m.maxDrawdownPct.toFixed(2) + "%"} / 終値ベース ${m.maxDrawdownClosePct === null ? "—" : m.maxDrawdownClosePct.toFixed(2) + "%"}（終値ベースがより実態に近い）`);
   console.log("");
   console.log("--- 意思決定サマリ（HOLD・却下も含む全判断） ---");
   const s = r.decisionSummary;
@@ -131,14 +133,46 @@ function printResult(r: BacktestResult) {
   for (const e of r.equity) console.log(`  ${e.date}: ${n(e.total)} (現金 ${n(e.cash)})`);
 }
 
+/** 再現に必要な設定スナップショット（結果JSONに保存）。 */
+function buildMeta(config: BacktestConfig) {
+  let gitCommit = "unknown";
+  try { gitCommit = execSync("git rev-parse --short HEAD", { stdio: "pipe" }).toString().trim(); } catch { /* noop */ }
+  const env = process.env;
+  return {
+    generatedAt: new Date().toISOString(),
+    gitCommit,
+    market,
+    strategy: config.strategy,
+    universeCount: config.tickers.length,
+    universeMode: env.BT_UNIVERSE || (env.BT_THEME === "1" ? "core+theme" : "core"),
+    initialCash: config.initialCash,
+    topN: config.topN,
+    useNews: config.useNews,
+    params: config.params, // RuleParams 全項目
+    costRate: Number(env.BT_COST) || 0.0015,
+    slippagePct: env.BT_SLIP ? Number(env.BT_SLIP) : 0,
+    stopLossPct: env.BT_STOP ? Number(env.BT_STOP) : -8,
+    takeProfitPct: env.BT_TP ? Number(env.BT_TP) : 10,
+    trailPct: env.BT_TRAIL ? Number(env.BT_TRAIL) : 0,
+    maxPositionPct: Number(env.BT_MAXPOS_PCT) || 0.2,
+    minCashPct: env.BT_MINCASH_PCT ? Number(env.BT_MINCASH_PCT) : 0.1,
+    regimeSma: env.BT_REGIME === "0" ? null : (Number(env.BT_REGIME_SMA) || 20),
+    ltrendSma: env.BT_LTREND != null && env.BT_LTREND !== "" ? Number(env.BT_LTREND) : 200,
+    screenMode: env.BT_SCREEN || "vol",
+    rawEnv: Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith("BT_"))),
+  };
+}
+
 async function main() {
   const config = buildConfig();
   console.log(`[backtest] 開始: ${market} ${startDate}〜${endDate} 対象${config.tickers.length}銘柄`);
   const r = await runBacktest(config);
   printResult(r);
+  const meta = buildMeta(config);
+  console.log(`\n[meta] commit=${meta.gitCommit} cost=${meta.costRate} slip=${meta.slippagePct} ltrend=${meta.ltrendSma} regime=${meta.regimeSma} screen=${meta.screenMode} 銘柄${meta.universeCount}`);
   const out = `${process.env.TEMP || "/tmp"}/backtest_${market}_${startDate}.json`;
-  writeFileSync(out, JSON.stringify(r, null, 2), "utf8");
-  console.log(`\n[backtest] JSON保存: ${out}`);
+  writeFileSync(out, JSON.stringify({ ...r, meta }, null, 2), "utf8");
+  console.log(`[backtest] JSON保存: ${out}`);
 }
 
 main().catch((e) => {
