@@ -37,28 +37,44 @@ export function detectMarket(ticker: string): Market {
   return ticker.toUpperCase().endsWith(".T") ? "JP" : "US";
 }
 
-/** 現在値を取得し、円換算値を付与して返す。 */
+// 現在値の短時間キャッシュ。ダッシュボードの連打や5分ボットの重複取得でレート制限に
+// かかると一部銘柄の取得が失敗し、表示損益がガクガク振れる問題を防ぐ。
+// 取得成功時はキャッシュを更新し、失敗時は直近の値（多少古くても）を返す。
+const QUOTE_TTL_MS = 20_000;
+const _quoteCache = new Map<string, { quote: Quote; ts: number }>();
+
+/** 現在値を取得し、円換算値を付与して返す（20秒キャッシュ・失敗時は直近値を再利用）。 */
 export async function getQuote(rawTicker: string): Promise<Quote> {
   const ticker = rawTicker.trim().toUpperCase();
-  const q = (await yahooFinance.quote(ticker)) as RawQuote;
-  if (!q || typeof q.regularMarketPrice !== "number") {
-    throw new Error(`株価を取得できませんでした: ${ticker}`);
+  const cached = _quoteCache.get(ticker);
+  if (cached && Date.now() - cached.ts < QUOTE_TTL_MS) return cached.quote;
+  try {
+    const q = (await yahooFinance.quote(ticker)) as RawQuote;
+    if (!q || typeof q.regularMarketPrice !== "number") {
+      throw new Error(`株価を取得できませんでした: ${ticker}`);
+    }
+    const currency = q.currency ?? (detectMarket(ticker) === "JP" ? "JPY" : "USD");
+    const jpyRate = await toJpyRate(currency);
+    const price = q.regularMarketPrice;
+    const quote: Quote = {
+      ticker,
+      name: q.shortName ?? q.longName ?? ticker,
+      market: detectMarket(ticker),
+      currency,
+      price,
+      priceJpy: price * jpyRate,
+      jpyRate,
+      previousClose: q.regularMarketPreviousClose ?? null,
+      changePercent: q.regularMarketChangePercent ?? null,
+      volume: q.regularMarketVolume ?? null,
+    };
+    _quoteCache.set(ticker, { quote, ts: Date.now() });
+    return quote;
+  } catch (e) {
+    // 取得失敗（レート制限等）時は直近の値を返す。一度も取れていなければエラー。
+    if (cached) return cached.quote;
+    throw e;
   }
-  const currency = q.currency ?? (detectMarket(ticker) === "JP" ? "JPY" : "USD");
-  const jpyRate = await toJpyRate(currency);
-  const price = q.regularMarketPrice;
-  return {
-    ticker,
-    name: q.shortName ?? q.longName ?? ticker,
-    market: detectMarket(ticker),
-    currency,
-    price,
-    priceJpy: price * jpyRate,
-    jpyRate,
-    previousClose: q.regularMarketPreviousClose ?? null,
-    changePercent: q.regularMarketChangePercent ?? null,
-    volume: q.regularMarketVolume ?? null,
-  };
 }
 
 /** 複数銘柄をまとめて取得（失敗銘柄はスキップ）。 */
