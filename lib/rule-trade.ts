@@ -29,6 +29,8 @@ import { getSetting, setSetting, logDecision, logCycle } from "./db";
 
 const STOP_LOSS_PCT = -8;
 const TAKE_PROFIT_PCT = 10;
+// 緊急ストップ: 日次判定を待たずに即時手仕舞いする急落閾値（災害保険。通常は発火しない）
+const DISASTER_STOP_PCT = -15;
 const MAX_POSITION_PCT = 0.2;
 const MIN_CASH_PCT = 0.1;
 const REGIME_SMA = 20;
@@ -139,22 +141,35 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
 
   const riskOff = await isRiskOff(cfg.bench);
 
-  // 1) リスク管理: 保有の損切り/利確（毎サイクル）
+  // 1) リスク管理: 損切り/利確の判定は「1営業日1回」（バックテストと同じ日次粒度）。
+  //    5分ごとの判定は検証していない高回転を生み、寄り直後のノイズで刈られる実害が出たため
+  //    （初週: 購入10分後に-8.8%損切り等）、日次に統一。ただし毎サイクル、-15%超の
+  //    急落だけは緊急ストップとして即時手仕舞いする（日次判定より悪化を防ぐ保護のみ）。
   const summary = await getPortfolioSummary(market);
   const limits = {
     maxPositionJpy: summary.totalValueJpy * MAX_POSITION_PCT,
     minCashJpy: summary.totalValueJpy * MIN_CASH_PCT,
   };
+  const today = dayKey(cfg.tz);
+  const riskDayKey = `last_risk_${market}`;
+  const isDailyRiskCheck = getSetting(riskDayKey) !== today;
+  if (isDailyRiskCheck) setSetting(riskDayKey, today);
   for (const h of summary.holdings) {
     let reason = "";
-    if (h.unrealizedPnlPct <= STOP_LOSS_PCT) reason = `自動損切り(${h.unrealizedPnlPct.toFixed(1)}%)`;
-    else if (h.unrealizedPnlPct >= TAKE_PROFIT_PCT) reason = `自動利確(${h.unrealizedPnlPct.toFixed(1)}%)`;
+    if (h.unrealizedPnlPct <= DISASTER_STOP_PCT)
+      reason = `緊急ストップ(${h.unrealizedPnlPct.toFixed(1)}%)`;
+    else if (isDailyRiskCheck && h.unrealizedPnlPct <= STOP_LOSS_PCT)
+      reason = `自動損切り(${h.unrealizedPnlPct.toFixed(1)}%)`;
+    else if (isDailyRiskCheck && h.unrealizedPnlPct >= TAKE_PROFIT_PCT)
+      reason = `自動利確(${h.unrealizedPnlPct.toFixed(1)}%)`;
     if (!reason) continue;
     decisionCount++;
     const r = await executeSell(h.ticker, h.shares, "AI", reason).catch(
       (e) => ({ ok: false, message: (e as Error).message }) as TradeResult,
     );
-    if (r.ok) { executedCount++; if (reason.startsWith("自動損切り")) setCooldown(market, h.ticker, cfg.tz); }
+    // クールダウンは損切り・利確どちらの手仕舞い後も適用（利確→翌日買い直し→損切りの
+    // 往復チャーンを防ぐ。フルサイクル+3.1pt/OOS+4.5ptの改善を検証済み）。
+    if (r.ok) { executedCount++; setCooldown(market, h.ticker, cfg.tz); }
     trades.push(r);
     logDecision({
       market, ticker: h.ticker, action: "SELL", shares: h.shares, executed: r.ok,
@@ -164,7 +179,6 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
   }
 
   // 2) 新規BUY: 1営業日に1度だけ
-  const today = dayKey(cfg.tz);
   const lastBuyKey = `last_buy_${market}`;
   let screened: string[] = [];
   if (getSetting(lastBuyKey) !== today) {

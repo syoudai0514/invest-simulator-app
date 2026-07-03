@@ -133,6 +133,12 @@ const TRAIL_PCT = process.env.BT_TRAIL ? Number(process.env.BT_TRAIL) : 0;
 // 最も頑健な改善だったため既定でON（BT_REGIME=0 で無効化可）。
 const REGIME_ON = process.env.BT_REGIME !== "0";
 const REGIME_SMA = Number(process.env.BT_REGIME_SMA) || 20;
+// レジームのヒステリシス（むち打ち対策）: SMAをこの率だけ上回って初めてリスクオン扱い。
+// ライブでSPYがSMA20を紙一重で上抜け→買い→反落→全滅、が起きたため検証用に追加。
+const REGIME_BUF = process.env.BT_REGIME_BUF ? Number(process.env.BT_REGIME_BUF) : 0;
+// クールダウンを利確後にも適用（既定ON）。利確→翌日買い直し→損切りの往復チャーンを防ぐ。
+// フルサイクル2022-26で+3.1pt、OOS2018-21で+4.5pt、取引数も約8%減と両期間で改善を確認。
+const COOLDOWN_ON_TP = process.env.BT_CD_TP !== "0";
 // 長期トレンドフィルタ: ベンチが自身のSMA(LTREND)を下回る＝長期下落局面では新規BUY全停止。
 // 「指数が200日線の下では買わない」は外部で有名なトレンドフォロー則。ただしこの銘柄群・
 // 利確損切り・スクリーナーとの組み合わせで優位かは別問題（＝この構成での有効性は仮説）。
@@ -368,7 +374,8 @@ export async function runBacktest(
       const benchPrev = benchPast[benchPast.length - 1];
       if (REGIME_ON) {
         const sma20 = sma(benchPast, REGIME_SMA);
-        if (sma20 != null && benchPrev != null && benchPrev < sma20) riskOff = true;
+        if (sma20 != null && benchPrev != null && benchPrev < sma20 * (1 + REGIME_BUF))
+          riskOff = true;
       }
       if (LTREND_SMA > 0) {
         const smaLt = sma(benchPast, LTREND_SMA);
@@ -405,7 +412,8 @@ export async function runBacktest(
       if (reason) {
         const soldShares = pos.shares;
         const r = sell(ticker, pos.shares, bar.open, day, reason);
-        if (r.ok && reason.startsWith("自動損切り")) stoppedAtIdx.set(ticker, dayIdx);
+        if (r.ok && (reason.startsWith("自動損切り") || (COOLDOWN_ON_TP && reason.startsWith("自動利確"))))
+          stoppedAtIdx.set(ticker, dayIdx);
         if (r.ok && isSurge) rebuyWatch.set(ticker, { sellOpen: bar.open, idx: dayIdx, shares: soldShares });
         decisionLog.push({
           date: day,
