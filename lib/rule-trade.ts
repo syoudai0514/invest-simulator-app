@@ -9,7 +9,7 @@
  *   - 毎サイクル: 保有のリスク管理（損切り/利確）とスナップショット記録。
  *   - 1営業日に1度: スクリーニング→ruleDecideで新規BUY。リスクオフ(指数<SMA20)時は停止。
  */
-import { getQuotes, getChart, type Quote, type Market } from "./yahoo";
+import { getQuotes, type Quote, type Market } from "./yahoo";
 import yahooFinance from "./yf";
 import { runScreener, getScreenedTickers } from "./screener";
 import { summarize, sma } from "./indicators";
@@ -18,6 +18,7 @@ import {
   executeBuy,
   executeSell,
   getCash,
+  getHoldings,
   getPortfolioSummary,
   recordEquitySnapshot,
   type TradeResult,
@@ -67,16 +68,15 @@ function dayKey(tz: string, d: Date = new Date()): string {
  * リスクオフ判定: ベンチ(指数)が短期SMA(20)または長期SMA(200)を下回る局面か。
  * - SMA20: 短期の下落で新規買いを一時停止（ヒゲ回避）
  * - SMA200: 長期下落（弱気相場）では新規買いを全停止（Meb Faber等の確立ルール）
+ *
+ * 【重要】バックテストと同じく「前日までの確定終値」だけで判定する。取引時間中の
+ * 当日バー（動いている途中値）を含めると、寄りの瞬間的な上ヒゲでリスクオンに誤判定
+ * → 買い→失速、のむち打ちが起きる（ライブ初週の米国6連敗の主因）。
  * SMA200算出のため日足を約400日分取得する。取得失敗時は false（通常運用）。
  */
-async function isRiskOff(bench: string): Promise<boolean> {
+async function isRiskOff(bench: string, tz: string): Promise<boolean> {
   try {
-    const to = new Date();
-    const from = new Date(to.getTime() - 400 * 24 * 60 * 60 * 1000);
-    const c = (await yahooFinance.chart(bench, { period1: from, period2: to, interval: "1d" })) as {
-      quotes?: { close: number | null }[];
-    };
-    const closes = (c.quotes ?? []).filter((q) => q.close != null).map((q) => q.close as number);
+    const closes = await completedCloses(bench, tz, 400);
     if (closes.length < REGIME_SMA + 1) return false;
     const last = closes[closes.length - 1];
     const s20 = sma(closes, REGIME_SMA);
@@ -87,6 +87,22 @@ async function isRiskOff(bench: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * 「当日の途中バー」を除いた確定日足の終値列を返す（古→新）。
+ * バックテストの「判断は前日までのデータのみ」をライブでも厳密に再現するための共通関数。
+ */
+async function completedCloses(ticker: string, tz: string, days: number): Promise<number[]> {
+  const to = new Date();
+  const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
+  const c = (await yahooFinance.chart(ticker, { period1: from, period2: to, interval: "1d" })) as {
+    quotes?: { date: Date; close: number | null }[];
+  };
+  const today = dayKey(tz);
+  return (c.quotes ?? [])
+    .filter((q) => q.close != null && dayKey(tz, new Date(q.date)) !== today)
+    .map((q) => q.close as number);
 }
 
 /* ---------- 損切り後クールダウン（市場別 settings JSON） ---------- */
@@ -139,7 +155,7 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
     return { market, ranAt, marketOpen: false, riskOff: false, decisions: 0, executed: 0, trades, note: status.reason };
   }
 
-  const riskOff = await isRiskOff(cfg.bench);
+  const riskOff = await isRiskOff(cfg.bench, cfg.tz);
 
   // 1) リスク管理: 損切り/利確の判定は「1営業日1回」（バックテストと同じ日次粒度）。
   //    5分ごとの判定は検証していない高回転を生み、寄り直後のノイズで刈られる実害が出たため
@@ -178,30 +194,37 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
     });
   }
 
-  // 2) 新規BUY: 1営業日に1度だけ
+  // 2) 日次判断: スクリーニング＋保有銘柄を対象に ruleDecide（1営業日に1度だけ）。
+  //    バックテスト同様、保有銘柄も実際の保有数で候補に含める。これにより
+  //    「下降トレンド転換・RSI過熱・悪材料でのトレンド手仕舞い」が本番でも機能し、
+  //    保有銘柄の誤った買い増しも防がれる（初週は heldShares=0 固定のバグで両方が死んでいた）。
   const lastBuyKey = `last_buy_${market}`;
   let screened: string[] = [];
   if (getSetting(lastBuyKey) !== today) {
     setSetting(lastBuyKey, today);
     await runScreener(market, true).catch(() => {});
     screened = getScreenedTickers(market).slice(0, TOP_N);
-    if (screened.length > 0) {
+    const heldNow = getHoldings(market); // 直前の損切り/利確を反映した最新の保有
+    const heldBy = new Map(heldNow.map((h) => [h.ticker, h]));
+    const targets = [...new Set([...screened, ...heldNow.map((h) => h.ticker)])];
+    if (targets.length > 0) {
       const cash = getCash(market);
-      const quotes = await getQuotes(screened);
+      const quotes = await getQuotes(targets);
       const quoteMap = new Map<string, Quote>(quotes.map((q) => [q.ticker, q]));
       // force=true: 市場ごとに自分の銘柄のニュースを必ず取得する。
       // （getNewsForTickers の1日1回キャッシュは市場共通のため、US/JPが同JST日に動くと
       //  後の市場が先の市場のキャッシュを掴む不具合を回避）
       let news: Record<string, { title: string }[]> = {};
-      try { news = await getNewsForTickers(screened, true); } catch { /* 指標のみで継続 */ }
+      try { news = await getNewsForTickers(targets, true); } catch { /* 指標のみで継続 */ }
 
       const candidates: Candidate[] = [];
       const ctxByTicker = new Map<string, { rsi14: number | null; sma20: number | null; sma50: number | null; momPct: number; dayRet: number; priceJpy: number }>();
-      for (const t of screened) {
+      for (const t of targets) {
         const q = quoteMap.get(t);
         if (!q) continue;
+        // 指標は「前日までの確定終値」で計算（当日の途中値を混ぜない＝バックテストと同条件）
         let closes: number[] = [];
-        try { closes = (await getChart(t, "3mo")).map((c) => c.close); } catch { /* skip */ }
+        try { closes = await completedCloses(t, cfg.tz, 130); } catch { /* skip */ }
         if (closes.length < 2) continue;
         const { sma20, sma50, rsi14 } = summarize(closes);
         const lastClose = closes[closes.length - 1];
@@ -210,9 +233,10 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
         const momPct = ((lastClose - monthAgo) / monthAgo) * 100;
         const dayRet = ((lastClose - closes[closes.length - 2]) / closes[closes.length - 2]) * 100;
         const maxBuyShares = Math.max(0, Math.floor(limits.maxPositionJpy / q.priceJpy));
+        const held = heldBy.get(t);
         candidates.push({
-          ticker: t, lastClose: q.price, sma20, sma50, rsi14, momPct,
-          maxBuyShares, heldShares: 0, avgCost: null,
+          ticker: t, lastClose, sma20, sma50, rsi14, momPct,
+          maxBuyShares, heldShares: held?.shares ?? 0, avgCost: held?.avgCostJpy ?? null,
           newsTitles: (news[t] ?? []).map((n) => n.title),
         });
         ctxByTicker.set(t, { rsi14, sma20, sma50, momPct, dayRet, priceJpy: q.priceJpy });
@@ -238,6 +262,23 @@ export async function runRuleTradeCycle(market: Market): Promise<RuleCycleResult
         inCooldown: makeInCooldown(market, cfg.tz),
       });
       for (const d of decisions) {
+        // トレンド手仕舞い（下降トレンド転換・RSI過熱・悪材料）: バックテスト同様、
+        // リスクオフ中でもSELLは常に実行する。手仕舞い後はクールダウン適用。
+        if (d.action === "SELL" && d.shares > 0) {
+          decisionCount++;
+          const ctxS = ctxByTicker.get(d.ticker);
+          const rS = await executeSell(d.ticker, d.shares, "AI", d.reasoning).catch(
+            (e) => ({ ok: false, message: (e as Error).message }) as TradeResult,
+          );
+          if (rS.ok) { executedCount++; setCooldown(market, d.ticker, cfg.tz); }
+          trades.push(rS);
+          logDecision({
+            market, ticker: d.ticker, action: "SELL", shares: d.shares, executed: rS.ok,
+            rejectReason: rS.ok ? null : rS.message, reasoning: d.reasoning,
+            priceJpy: ctxS?.priceJpy, rsi14: ctxS?.rsi14, sma20: ctxS?.sma20, sma50: ctxS?.sma50, momPct: ctxS?.momPct, dayRet: ctxS?.dayRet,
+          });
+          continue;
+        }
         if (d.action !== "BUY" || d.shares <= 0) continue;
         decisionCount++;
         const ctx = ctxByTicker.get(d.ticker);
